@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+[package]
+edition = "2024"
+keywords = ["nfc"]
+license = "GPL-3.0-or-later"
+name = "iso14443"
+repository = "https://github.com/Foundation-Devices/iso14443-rs"
+rust-version = "1.88.0"
+version = "0.1.0"
+
+[dependencies]
+bitflags = "2.9"
+bounded-integer = { version = "0.6", features = ["num-traits02"] }
+num_enum = "0.7"
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+
+[[example]]
+name = "cli_parser"
+path = "example/cli_parser.rs"
