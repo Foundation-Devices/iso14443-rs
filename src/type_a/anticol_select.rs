@@ -28,7 +28,9 @@ impl TryFrom<&[u8]> for UidCl {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() == 5 {
-            Self::try_from(<&[u8; 5]>::try_from(value).map_err(|_| TypeAError::UnknownOpcode)?)
+            Self::try_from(
+                <&[u8; 5]>::try_from(value).map_err(|_| TypeAError::UnknownOpcode(value[0]))?,
+            )
         } else {
             Err(TypeAError::InvalidLength)
         }
@@ -53,7 +55,7 @@ impl Cascade {
             0x93 => Ok(Cascade::Level1(UidCl::try_from(uid_cl)?)),
             0x95 => Ok(Cascade::Level2(UidCl::try_from(uid_cl)?)),
             0x97 => Ok(Cascade::Level3(UidCl::try_from(uid_cl)?)),
-            _ => Err(TypeAError::UnknownOpcode),
+            _ => Err(TypeAError::UnknownOpcode(sel)),
         }
     }
     fn code(&self) -> u8 {
@@ -113,8 +115,10 @@ impl TryFrom<u8> for NumberOfValidBits {
     type Error = TypeAError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        let byte_cnt = <BoundedU8<2, 7>>::new(value >> 4).ok_or(TypeAError::UnknownOpcode)?;
-        let bit_cnt = <BoundedU8<0, 7>>::new(value & 0xf).ok_or(TypeAError::UnknownOpcode)?;
+        let byte_cnt =
+            <BoundedU8<2, 7>>::new(value >> 4).ok_or(TypeAError::UnknownOpcode(value >> 4))?;
+        let bit_cnt =
+            <BoundedU8<0, 7>>::new(value & 0xf).ok_or(TypeAError::UnknownOpcode(value & 0xf))?;
         Ok(Self { byte_cnt, bit_cnt })
     }
 }

@@ -15,7 +15,7 @@ use sak::Sak;
 #[derive(Debug)]
 pub enum TypeAError {
     InvalidLength,
-    UnknownOpcode,
+    UnknownOpcode(u8),
     InvalidCrc,
     InvalidBcc,
     UnknownSel,
@@ -86,14 +86,14 @@ impl TryFrom<&[u8]> for Command {
             &[0x26] => Ok(Command::ReqA),
             &[0x52] => Ok(Command::WupA),
             &[0x50, 0x00, crc1, crc2] => {
-                if crc_a(&[0x50, 0x00]) == (crc1, crc2) {
+                if crc_a(&[0x50, 0x00]) == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                     Ok(Command::HltA)
                 } else {
                     Err(TypeAError::InvalidCrc)
                 }
             }
             &[0xe0, param, crc1, crc2] => {
-                if crc_a(&[0xe0, param]) == (crc1, crc2) {
+                if crc_a(&[0xe0, param]) == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                     Ok(Command::Rats(RatsParam::try_from(param)?))
                 } else {
                     Err(TypeAError::InvalidCrc)
@@ -101,14 +101,16 @@ impl TryFrom<&[u8]> for Command {
             }
             &[sel, nvb] if Cascade::check_sel(sel) => {
                 let cascade = Cascade::try_from(sel, &[0, 0, 0, 0, 0])
-                    .map_err(|_| TypeAError::UnknownOpcode)?;
+                    .map_err(|_| TypeAError::UnknownOpcode(sel))?;
                 let nvb = NumberOfValidBits::try_from(nvb)?;
                 Ok(Command::AntiCollision((cascade, nvb)))
             }
             &[sel, nvb, uid0, uid1, uid2, uid3, bcc, crc1, crc2] if Cascade::check_sel(sel) => {
-                if crc_a(&[sel, nvb, uid0, uid1, uid2, uid3, bcc]) == (crc1, crc2) {
+                if crc_a(&[sel, nvb, uid0, uid1, uid2, uid3, bcc]) == (crc1, crc2)
+                    || (0, 0) == (crc1, crc2)
+                {
                     let cascade = Cascade::try_from(sel, &[uid0, uid1, uid2, uid3, bcc])
-                        .map_err(|_| TypeAError::UnknownOpcode)?;
+                        .map_err(|_| TypeAError::UnknownOpcode(sel))?;
                     let nvb = NumberOfValidBits::try_from(nvb)?;
                     if nvb.has_40_data_bits() {
                         Ok(Command::Select(cascade))
@@ -120,10 +122,10 @@ impl TryFrom<&[u8]> for Command {
                 }
             }
             _ => {
-                if value.len() < 1 {
+                if value.is_empty() {
                     Err(TypeAError::InvalidLength)
                 } else {
-                    Err(TypeAError::UnknownOpcode)
+                    Err(TypeAError::UnknownOpcode(value[0]))
                 }
             }
         }

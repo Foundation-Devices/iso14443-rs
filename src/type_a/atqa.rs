@@ -38,9 +38,9 @@ impl TryFrom<&[u8]> for AtqA {
         if value.len() == 2 {
             Ok(Self {
                 uid_size: UidSize::try_from((value[0] >> 6) & 0b11)
-                    .map_err(|_| TypeAError::UnknownOpcode)?,
+                    .map_err(|_| TypeAError::UnknownOpcode(value[0] >> 6))?,
                 bit_frame_ac: BitFrameAntiCollistion::try_from(value[0] & 0b11111)
-                    .map_err(|_| TypeAError::UnknownOpcode)?,
+                    .map_err(|_| TypeAError::UnknownOpcode(value[0] & 0b11111))?,
                 proprietary_coding: value[1] & 0b1111,
             })
         } else {

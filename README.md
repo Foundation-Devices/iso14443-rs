@@ -15,7 +15,7 @@ Rust library to manipulate ISO/IEC 14443 data.
     - [x] iso14443-3: REQA/WUPA/ATQA/ANTICOLLISION/SELECT/SAK/HLTA
     - [x] CRC_A checks
     - [x] iso14443-4: RATS/ATS
-    - [ ] iso14443-4: PPSS/PPSR
+    - [ ] iso14443-4: PPSS/PCB
 - [ ] Type-B
 
 ## Example Usage
@@ -23,10 +23,7 @@ Rust library to manipulate ISO/IEC 14443 data.
 An example is provided to parse raw data from the ISO14443 protocol:
 
 ```bash
-$ cargo run --example cli_parser -- e050bca5 057780800046ab
-cmd: Rats(RatsParam(Fsd64, Cid(Bounded(00))))
-ans: Ats(Ats { length: 05, format: Format { fsc: 80, ta_transmitted: true, tb_transmitted: true, tc_transmitted: true }, ta: Ta(SAME_D_SUPP), tb: Tb { sfgi: Sfgi(00), fwi: Fwi(08) }, tc: Tc(0x0), historical_bytes: [] })
+$ cargo run --example cli_parser -- -c e050bca5 -a 057780800046ab
+command: Rats(RatsParam(Fsd64, Cid(Bounded(00))))
+answer: Ats(Ats { length: 05, format: Format { fsc: 80, ta_transmitted: true, tb_transmitted: true, tc_transmitted: true }, ta: Ta(SAME_D_SUPP), tb: Tb { sfgi: Sfgi(00), fwi: Fwi(08) }, tc: Tc(0x0), historical_bytes: [] })
 ```
-
-The first argument is the command sent by PCD to PICC in hexadecimal format.
-The second argument is the answer from PICC to PCD.

@@ -68,7 +68,9 @@ impl TryFrom<&[u8]> for Ats {
         historical_bytes.extend_from_slice(&value[offset..offset + historical_bytes_len]);
         offset += historical_bytes_len;
         if value.len() == offset + 2 {
-            if crc_a(&value[..offset]) == (value[offset], value[offset + 1]) {
+            if crc_a(&value[..offset]) == (value[offset], value[offset + 1])
+                || (0, 0) == (value[offset], value[offset + 1])
+            {
                 Ok(Self {
                     length,
                     format,
@@ -278,6 +280,8 @@ mod tests {
         assert_eq!(fwi.fwt(), Duration::from_micros(4832));
         let fwi = Fwi::try_from(0u8).unwrap();
         assert_eq!(fwi.fwt(), Duration::from_micros(302));
+        let fwi = Fwi::try_from(8u8).unwrap();
+        assert_eq!(fwi.fwt(), Duration::from_micros(77312));
         let fwi = Fwi::try_from(14u8).unwrap();
         assert_eq!(fwi.fwt(), Duration::from_micros(4947968));
         assert!(Fwi::try_from(15u8).is_err());
