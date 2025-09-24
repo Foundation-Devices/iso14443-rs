@@ -68,9 +68,10 @@ impl TryFrom<&[u8]> for Ats {
         historical_bytes.extend_from_slice(&value[offset..offset + historical_bytes_len]);
         offset += historical_bytes_len;
         if value.len() == offset + 2 {
-            if crc_a(&value[..offset]) == (value[offset], value[offset + 1])
-                || (0, 0) == (value[offset], value[offset + 1])
-            {
+            let crc1 = value[offset];
+            let crc2 = value[offset + 1];
+            let good = crc_a(&value[..offset]);
+            if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                 Ok(Self {
                     length,
                     format,
@@ -80,7 +81,7 @@ impl TryFrom<&[u8]> for Ats {
                     historical_bytes,
                 })
             } else {
-                Err(TypeAError::InvalidCrc)
+                Err(TypeAError::InvalidCrc(good))
             }
         } else {
             Err(TypeAError::InvalidLength)

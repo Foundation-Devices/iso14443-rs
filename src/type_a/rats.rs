@@ -1,9 +1,7 @@
 use bounded_integer::BoundedU8;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use super::TypeAError;
-#[derive(Debug)]
-pub struct Cid(BoundedU8<0, 14>);
+use super::{Cid, TypeAError};
 
 /// ISO/IEC 14443-4
 /// 5.1 Request for answer to select

@@ -1,9 +1,7 @@
 use bounded_integer::BoundedU8;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use super::TypeAError;
-#[derive(Debug)]
-pub struct Cid(BoundedU8<0, 14>);
+use super::{Cid, TypeAError, crc_a};
 
 impl From<&Cid> for u8 {
     fn from(value: &Cid) -> Self {
@@ -16,9 +14,9 @@ impl From<&Cid> for u8 {
 /// Figure 9 - Protocol and parameter selection request
 #[derive(Debug)]
 pub struct PpsParam {
-    pub(crate) cid: Cid,
-    pub(crate) dri: Dxi,
-    pub(crate) dsi: Dxi,
+    pub cid: Cid,
+    pub dri: Dxi,
+    pub dsi: Dxi,
 }
 
 impl From<&PpsParam> for u8 {
@@ -47,7 +45,13 @@ impl TryFrom<&[u8]> for PpsParam {
         } else {
             (Dxi::default(), Dxi::default())
         };
-        // TODO: check CRC
+        let len = value.len();
+        let crc1 = value[len - 2];
+        let crc2 = value[len - 1];
+        let good = crc_a(&value[..len - 2]);
+        if good != (crc1, crc2) && (0, 0) != (crc1, crc2) {
+            return Err(TypeAError::InvalidCrc(good));
+        }
         Ok(Self { cid, dri, dsi })
     }
 }
@@ -79,8 +83,8 @@ impl Dxi {
 
 /// ISO/IEC 14443-4
 /// 5.4 - Protocol and parameter selection response
-#[derive(Debug, Clone, Copy)]
-pub struct PpsResp(pub u8);
+#[derive(Debug)]
+pub struct PpsResp(pub Cid);
 
 /// ISO/IEC 14443-4
 /// Figure 13 - Protocol and parameter selection response
@@ -91,7 +95,14 @@ impl TryFrom<&[u8]> for PpsResp {
         if value.len() != 3 {
             return Err(TypeAError::InvalidLength);
         }
-        // TODO: check CRC
-        Ok(Self(value[0]))
+        let crc1 = value[1];
+        let crc2 = value[2];
+        let good = crc_a(&value[..1]);
+        if good != (crc1, crc2) && (0, 0) != (crc1, crc2) {
+            return Err(TypeAError::InvalidCrc(good));
+        }
+        Ok(Self(Cid(
+            <BoundedU8<0, 14>>::new(value[0] & 0xf).ok_or(TypeAError::Other)?
+        )))
     }
 }

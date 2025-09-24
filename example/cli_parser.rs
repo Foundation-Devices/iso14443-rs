@@ -30,7 +30,9 @@ fn main() {
             // add a fake crc
             ans.extend_from_slice(&[0, 0]);
         }
-        let ans = cmd.parse_answer(&ans).unwrap();
+        let ans = cmd
+            .parse_answer(&ans)
+            .unwrap_or_else(|e| panic!("{:02x?}", e));
         println!("answer: {:02x?}", ans);
     }
 }

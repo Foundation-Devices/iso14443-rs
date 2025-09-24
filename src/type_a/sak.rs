@@ -12,13 +12,16 @@ impl TryFrom<&[u8]> for Sak {
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
         if value.len() == 3 {
-            if crc_a(&value[..1]) == (value[1], value[2]) || (0, 0) == (value[1], value[2]) {
+            let crc1 = value[1];
+            let crc2 = value[2];
+            let good = crc_a(&value[..1]);
+            if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                 Ok(Self {
                     uid_complete: value[0] & 0x04 != 0x04,
                     iso14443_4_compliant: value[0] & 0x20 == 0x20,
                 })
             } else {
-                Err(TypeAError::InvalidCrc)
+                Err(TypeAError::InvalidCrc(good))
             }
         } else {
             Err(TypeAError::InvalidLength)
