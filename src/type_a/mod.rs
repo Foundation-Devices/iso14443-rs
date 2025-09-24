@@ -2,6 +2,7 @@ mod anticol_select;
 mod atqa;
 mod ats;
 mod crc;
+mod pps;
 mod rats;
 mod sak;
 
@@ -9,6 +10,7 @@ use anticol_select::{Cascade, NumberOfValidBits, UidCl};
 use atqa::AtqA;
 use ats::Ats;
 use crc::{append_crc_a, crc_a};
+use pps::{PpsParam, PpsResp};
 use rats::RatsParam;
 use sak::Sak;
 
@@ -35,6 +37,7 @@ pub enum Answer {
     UidCl(UidCl),
     Sak(Sak),
     Ats(Ats),
+    Pps(PpsResp),
 }
 
 #[derive(Debug)]
@@ -45,13 +48,16 @@ pub enum Command {
     Select(Cascade),
     HltA,
     Rats(RatsParam),
+    Pps(PpsParam),
 }
 
 impl Command {
     pub fn frame(&self) -> Frame {
         match self {
             Command::ReqA | Command::WupA => Frame::Short,
-            Command::HltA | Command::Select(_) | Command::Rats(_) => Frame::Standard,
+            Command::HltA | Command::Select(_) | Command::Rats(_) | Command::Pps(_) => {
+                Frame::Standard
+            }
             Command::AntiCollision(_) => Frame::BitOriented,
         }
     }
@@ -64,6 +70,9 @@ impl Command {
             Command::Select(cascade) => append_crc_a(cascade.raw(0x70).as_slice()),
             Command::HltA => append_crc_a(&[0x50, 0x00]),
             Command::Rats(param) => append_crc_a(&[0xe0, u8::from(param)]),
+            Command::Pps(param) => {
+                append_crc_a(&[0xd0 + u8::from(&param.cid), 0x11, u8::from(param)])
+            }
         }
     }
 
@@ -74,6 +83,7 @@ impl Command {
             Command::Select(_) => Ok(Answer::Sak(Sak::try_from(raw)?)),
             Command::HltA => unreachable!("HLTA should be answered"),
             Command::Rats(_) => Ok(Answer::Ats(Ats::try_from(raw)?)),
+            Command::Pps(_) => Ok(Answer::Pps(PpsResp::try_from(raw)?)),
         }
     }
 }
@@ -125,7 +135,11 @@ impl TryFrom<&[u8]> for Command {
                 if value.is_empty() {
                     Err(TypeAError::InvalidLength)
                 } else {
-                    Err(TypeAError::UnknownOpcode(value[0]))
+                    if value[0] & 0xF0 == 0xD0 {
+                        Ok(Command::Pps(PpsParam::try_from(value)?))
+                    } else {
+                        Err(TypeAError::UnknownOpcode(value[0]))
+                    }
                 }
             }
         }

@@ -14,8 +14,8 @@ Rust library to manipulate ISO/IEC 14443 data.
 - [x] Type-A
     - [x] iso14443-3: REQA/WUPA/ATQA/ANTICOLLISION/SELECT/SAK/HLTA
     - [x] CRC_A checks
-    - [x] iso14443-4: RATS/ATS
-    - [ ] iso14443-4: PPSS/PCB
+    - [x] iso14443-4: RATS/ATS/PPS
+    - [ ] iso14443-4: PCB
 - [ ] Type-B
 
 ## Example Usage

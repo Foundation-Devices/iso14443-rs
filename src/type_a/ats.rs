@@ -282,6 +282,8 @@ mod tests {
         assert_eq!(fwi.fwt(), Duration::from_micros(302));
         let fwi = Fwi::try_from(8u8).unwrap();
         assert_eq!(fwi.fwt(), Duration::from_micros(77312));
+        let fwi = Fwi::try_from(9u8).unwrap();
+        assert_eq!(fwi.fwt(), Duration::from_micros(154624));
         let fwi = Fwi::try_from(14u8).unwrap();
         assert_eq!(fwi.fwt(), Duration::from_micros(4947968));
         assert!(Fwi::try_from(15u8).is_err());
