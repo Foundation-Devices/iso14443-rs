@@ -1,7 +1,7 @@
 use super::TypeAError;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-/// 6.4.2 ATQA - Answer To Request
+// 6.4.2 ATQA - Answer To Request
 
 /// Table 4 - Coding of b7,b8 for UID size bit frame
 #[derive(Debug, Clone, IntoPrimitive, TryFromPrimitive)]

@@ -94,10 +94,10 @@ impl TryFrom<&[u8]> for Command {
     type Error = TypeAError;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        match value {
-            &[0x26] => Ok(Command::ReqA),
-            &[0x52] => Ok(Command::WupA),
-            &[0x50, 0x00, crc1, crc2] => {
+        match *value {
+            [0x26] => Ok(Command::ReqA),
+            [0x52] => Ok(Command::WupA),
+            [0x50, 0x00, crc1, crc2] => {
                 let good = crc_a(&[0x50, 0x00]);
                 if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                     Ok(Command::HltA)
@@ -105,7 +105,7 @@ impl TryFrom<&[u8]> for Command {
                     Err(TypeAError::InvalidCrc(good))
                 }
             }
-            &[0xe0, param, crc1, crc2] => {
+            [0xe0, param, crc1, crc2] => {
                 let good = crc_a(&[0xe0, param]);
                 if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                     Ok(Command::Rats(RatsParam::try_from(param)?))
@@ -113,13 +113,13 @@ impl TryFrom<&[u8]> for Command {
                     Err(TypeAError::InvalidCrc(good))
                 }
             }
-            &[sel, nvb] if Cascade::check_sel(sel) => {
+            [sel, nvb] if Cascade::check_sel(sel) => {
                 let cascade = Cascade::try_from(sel, &[0, 0, 0, 0, 0])
                     .map_err(|_| TypeAError::UnknownOpcode(sel))?;
                 let nvb = NumberOfValidBits::try_from(nvb)?;
                 Ok(Command::AntiCollision((cascade, nvb)))
             }
-            &[sel, nvb, uid0, uid1, uid2, uid3, bcc, crc1, crc2] if Cascade::check_sel(sel) => {
+            [sel, nvb, uid0, uid1, uid2, uid3, bcc, crc1, crc2] if Cascade::check_sel(sel) => {
                 let good = crc_a(&[sel, nvb, uid0, uid1, uid2, uid3, bcc]);
                 if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
                     let cascade = Cascade::try_from(sel, &[uid0, uid1, uid2, uid3, bcc])
@@ -137,12 +137,10 @@ impl TryFrom<&[u8]> for Command {
             _ => {
                 if value.is_empty() {
                     Err(TypeAError::InvalidLength)
+                } else if value[0] & 0xF0 == 0xD0 {
+                    Ok(Command::Pps(PpsParam::try_from(value)?))
                 } else {
-                    if value[0] & 0xF0 == 0xD0 {
-                        Ok(Command::Pps(PpsParam::try_from(value)?))
-                    } else {
-                        Err(TypeAError::UnknownOpcode(value[0]))
-                    }
+                    Err(TypeAError::UnknownOpcode(value[0]))
                 }
             }
         }
