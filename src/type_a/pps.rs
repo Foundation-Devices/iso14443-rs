@@ -1,5 +1,6 @@
 use bounded_integer::BoundedU8;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use std::fmt;
 
 use super::{Cid, TypeAError, crc_a};
 
@@ -58,7 +59,7 @@ impl TryFrom<&[u8]> for PpsParam {
 
 /// ISO/IEC 14443-4
 /// Table 2 - DRI, DSI to D conversion
-#[derive(Debug, Default, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[derive(Default, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Dxi {
     #[default]
@@ -66,6 +67,12 @@ pub enum Dxi {
     Dx2,
     Dx4,
     Dx8,
+}
+
+impl fmt::Debug for Dxi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> Dx({})", *self as u8, self.dx())
+    }
 }
 
 impl Dxi {

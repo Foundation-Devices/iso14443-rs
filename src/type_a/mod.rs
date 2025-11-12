@@ -1,4 +1,5 @@
 use bounded_integer::BoundedU8;
+use std::fmt;
 
 mod anticol_select;
 mod atqa;
@@ -147,5 +148,10 @@ impl TryFrom<&[u8]> for Command {
     }
 }
 
-#[derive(Debug)]
 pub struct Cid(BoundedU8<0, 14>);
+
+impl fmt::Debug for Cid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.get())
+    }
+}

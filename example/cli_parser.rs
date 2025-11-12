@@ -24,7 +24,7 @@ fn main() {
         cmd.extend_from_slice(&[0, 0]);
     }
     let cmd = Command::try_from(cmd.as_slice()).unwrap_or_else(|e| panic!("{:02x?}", e));
-    println!("command: {:02x?}", cmd);
+    println!("command: {:#02x?}", cmd);
     if !ans.is_empty() {
         if args.no_crc {
             // add a fake crc
@@ -33,6 +33,6 @@ fn main() {
         let ans = cmd
             .parse_answer(&ans)
             .unwrap_or_else(|e| panic!("{:02x?}", e));
-        println!("answer: {:02x?}", ans);
+        println!("answer: {:#02x?}", ans);
     }
 }

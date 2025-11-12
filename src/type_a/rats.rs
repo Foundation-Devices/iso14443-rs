@@ -1,17 +1,23 @@
 use bounded_integer::BoundedU8;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use std::fmt;
 
 use super::{Cid, TypeAError};
 
 /// ISO/IEC 14443-4
 /// 5.1 Request for answer to select
 /// Figure 3 - Coding of RATS paramter byte
-#[derive(Debug)]
 pub struct RatsParam(Fsdi, Cid);
 
 impl From<&RatsParam> for u8 {
     fn from(value: &RatsParam) -> Self {
         ((value.0 as u8) << 4) | (value.1.0)
+    }
+}
+
+impl fmt::Debug for RatsParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RatsParam(fsdi: {:?}, cid: {:?})", self.0, self.1)
     }
 }
 
@@ -27,7 +33,7 @@ impl TryFrom<u8> for RatsParam {
 
 /// ISO/IEC 14443-4
 /// Table 1 - FSDI to FSD conversion
-#[derive(Debug, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[derive(Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Fsdi {
     Fsd16,
@@ -39,6 +45,12 @@ pub enum Fsdi {
     Fsd96,
     Fsd128,
     Fsd256,
+}
+
+impl fmt::Debug for Fsdi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> FSD({} bytes)", *self as u8, self.fsd())
+    }
 }
 
 impl Fsdi {

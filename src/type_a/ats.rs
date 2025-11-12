@@ -1,3 +1,4 @@
+use std::fmt;
 use std::time::Duration;
 
 use super::{TypeAError, crc::crc_a};
@@ -93,7 +94,7 @@ impl TryFrom<&[u8]> for Ats {
 /// Figure 5 - Coding of format byte
 #[derive(Debug, Default)]
 pub struct Format {
-    pub fsc: usize,
+    pub fsci: Fsci,
     ta_transmitted: bool,
     tb_transmitted: bool,
     tc_transmitted: bool,
@@ -104,9 +105,7 @@ impl TryFrom<u8> for Format {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         Ok(Self {
-            fsc: Fsci::try_from(value & 0b0000_1111)
-                .map_err(|_| TypeAError::Other)?
-                .fsc(),
+            fsci: Fsci::try_from(value & 0b0000_1111).map_err(|_| TypeAError::Other)?,
             ta_transmitted: value & 0b0001_0000 == 0b0001_0000,
             tb_transmitted: value & 0b0010_0000 == 0b0010_0000,
             tc_transmitted: value & 0b0100_0000 == 0b0100_0000,
@@ -116,7 +115,7 @@ impl TryFrom<u8> for Format {
 
 /// ISO/IEC 14443-4
 /// Table 1 - FSCI to FSC conversion
-#[derive(Debug, Default, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
+#[derive(Default, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Fsci {
     Fsc16,
@@ -129,6 +128,12 @@ pub enum Fsci {
     Fsc96,
     Fsc128,
     Fsc256,
+}
+
+impl fmt::Debug for Fsci {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> FSC({} bytes)", *self as u8, self.fsc())
+    }
 }
 
 impl Fsci {
@@ -184,7 +189,7 @@ impl TryFrom<u8> for Tb {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Sfgi(u8);
 
 /// SFGI is coded in the range from 0 to 14.
@@ -212,7 +217,12 @@ impl Sfgi {
     }
 }
 
-#[derive(Debug)]
+impl fmt::Debug for Sfgi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> SFGT({:?})", self.0, self.sfgt())
+    }
+}
+
 pub struct Fwi(u8);
 
 impl TryFrom<u8> for Fwi {
@@ -231,6 +241,12 @@ impl TryFrom<u8> for Fwi {
 impl Default for Fwi {
     fn default() -> Self {
         Self(4)
+    }
+}
+
+impl fmt::Debug for Fwi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} -> FWT({:?})", self.0, self.fwt())
     }
 }
 
