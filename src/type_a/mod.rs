@@ -175,11 +175,26 @@ impl TryFrom<&[u8]> for Command {
 }
 
 // Re-export block-related types
-pub use block::{Block, Cid as BlockCid};
+pub use block::Block;
 pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
 pub use protocol::{BlockChain, ProtocolHandler, ProtocolState};
 
-pub struct Cid(BoundedU8<0, 14>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Cid(pub BoundedU8<0, 14>);
+
+impl Cid {
+    pub fn new(value: u8) -> Option<Self> {
+        if value <= 14 {
+            Some(Self(BoundedU8::new(value).unwrap()))
+        } else {
+            None
+        }
+    }
+
+    pub fn value(&self) -> u8 {
+        self.0.get()
+    }
+}
 
 impl fmt::Debug for Cid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

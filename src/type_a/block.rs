@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use bounded_integer::BoundedU8;
 use std::fmt;
 
+use super::Cid;
 use super::crc::crc_a;
 use super::pcb::{BlockType, Pcb};
 
@@ -29,29 +29,6 @@ impl fmt::Debug for Block {
             write!(f, ", DATA: {:02x?}", self.payload)?;
         }
         Ok(())
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Cid(pub BoundedU8<0, 14>);
-
-impl Cid {
-    pub fn new(value: u8) -> Option<Self> {
-        if value <= 14 {
-            Some(Self(BoundedU8::new(value).unwrap()))
-        } else {
-            None
-        }
-    }
-
-    pub fn value(&self) -> u8 {
-        self.0.get()
-    }
-}
-
-impl fmt::Debug for Cid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.value())
     }
 }
 
