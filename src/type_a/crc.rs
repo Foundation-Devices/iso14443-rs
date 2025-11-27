@@ -49,4 +49,9 @@ mod tests {
     fn crc_a_rats() {
         assert_eq!(crc_a(&[0xe0, 0x50]), (0xbc, 0xa5));
     }
+
+    #[test]
+    fn crc_a_deselect() {
+        assert_eq!(crc_a(&[0xc2]), (0xe0, 0xb4));
+    }
 }

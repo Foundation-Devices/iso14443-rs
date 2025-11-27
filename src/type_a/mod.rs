@@ -4,8 +4,11 @@ use std::fmt;
 mod anticol_select;
 mod atqa;
 mod ats;
+mod block;
 mod crc;
+mod pcb;
 mod pps;
+mod protocol;
 mod rats;
 mod sak;
 
@@ -17,13 +20,14 @@ use pps::{PpsParam, PpsResp};
 use rats::RatsParam;
 use sak::Sak;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeAError {
     InvalidLength,
     UnknownOpcode(u8),
     InvalidCrc((u8, u8)),
     InvalidBcc,
     UnknownSel,
+    InvalidPcb,
     Other,
 }
 
@@ -41,6 +45,7 @@ pub enum Answer {
     Sak(Sak),
     Ats(Ats),
     Pps(PpsResp),
+    Block(Block),
 }
 
 #[derive(Debug)]
@@ -52,15 +57,22 @@ pub enum Command {
     HltA,
     Rats(RatsParam),
     Pps(PpsParam),
+    IBlock(Block),
+    RBlock(Block),
+    SBlock(Block),
 }
 
 impl Command {
     pub fn frame(&self) -> Frame {
         match self {
             Command::ReqA | Command::WupA => Frame::Short,
-            Command::HltA | Command::Select(_) | Command::Rats(_) | Command::Pps(_) => {
-                Frame::Standard
-            }
+            Command::HltA
+            | Command::Select(_)
+            | Command::Rats(_)
+            | Command::Pps(_)
+            | Command::IBlock(_)
+            | Command::RBlock(_)
+            | Command::SBlock(_) => Frame::Standard,
             Command::AntiCollision(_) => Frame::BitOriented,
         }
     }
@@ -76,6 +88,9 @@ impl Command {
             Command::Pps(param) => {
                 append_crc_a(&[0xd0 + u8::from(&param.cid), 0x11, u8::from(param)])
             }
+            Command::IBlock(block) | Command::RBlock(block) | Command::SBlock(block) => {
+                append_crc_a(&block.to_vec())
+            }
         }
     }
 
@@ -87,6 +102,9 @@ impl Command {
             Command::HltA => unreachable!("HLTA should be answered"),
             Command::Rats(_) => Ok(Answer::Ats(Ats::try_from(raw)?)),
             Command::Pps(_) => Ok(Answer::Pps(PpsResp::try_from(raw)?)),
+            Command::IBlock(_) | Command::RBlock(_) | Command::SBlock(_) => {
+                Ok(Answer::Block(Block::try_from(raw)?))
+            }
         }
     }
 }
@@ -141,12 +159,25 @@ impl TryFrom<&[u8]> for Command {
                 } else if value[0] & 0xF0 == 0xD0 {
                     Ok(Command::Pps(PpsParam::try_from(value)?))
                 } else {
-                    Err(TypeAError::UnknownOpcode(value[0]))
+                    // Try to parse as a block
+                    match Block::try_from(value) {
+                        Ok(block) => match block.block_type() {
+                            BlockType::IBlock => Ok(Command::IBlock(block)),
+                            BlockType::RBlock => Ok(Command::RBlock(block)),
+                            BlockType::SBlock => Ok(Command::SBlock(block)),
+                        },
+                        Err(_) => Err(TypeAError::UnknownOpcode(value[0])),
+                    }
                 }
             }
         }
     }
 }
+
+// Re-export block-related types
+pub use block::{Block, Cid as BlockCid};
+pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
+pub use protocol::{BlockChain, ProtocolHandler, ProtocolState};
 
 pub struct Cid(BoundedU8<0, 14>);
 

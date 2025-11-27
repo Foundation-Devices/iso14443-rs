@@ -1,6 +1,6 @@
 use clap::Parser;
 use hex::FromHex;
-use iso14443::type_a::Command;
+use iso14443::type_a::{Block, Command};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
@@ -11,6 +11,8 @@ struct Args {
     answer: Option<String>,
     #[arg(short, long)]
     no_crc: bool,
+    #[arg(short, long, help = "Parse as ISO14443-4 block format")]
+    block: bool,
 }
 
 fn main() {
@@ -23,16 +25,27 @@ fn main() {
         // add a fake crc
         cmd.extend_from_slice(&[0, 0]);
     }
-    let cmd = Command::try_from(cmd.as_slice()).unwrap_or_else(|e| panic!("{:02x?}", e));
-    println!("command: {:#02x?}", cmd);
-    if !ans.is_empty() {
-        if args.no_crc {
-            // add a fake crc
-            ans.extend_from_slice(&[0, 0]);
+    if args.no_crc {
+        ans.extend_from_slice(&[0, 0]);
+    }
+
+    // Parse as command format
+    if args.block {
+        let block = Block::try_from(cmd.as_slice()).unwrap_or_else(|e| panic!("{:02x?}", e));
+        println!("command: {:#02x?}", block);
+        if ans.len() > 2 {
+            let response_block =
+                Block::try_from(ans.as_slice()).unwrap_or_else(|e| panic!("{:02x?}", e));
+            println!("answer: {:#02x?}", response_block);
         }
-        let ans = cmd
-            .parse_answer(&ans)
-            .unwrap_or_else(|e| panic!("{:02x?}", e));
-        println!("answer: {:#02x?}", ans);
+    } else {
+        let cmd = Command::try_from(cmd.as_slice()).unwrap_or_else(|e| panic!("{:02x?}", e));
+        println!("command: {:#02x?}", cmd);
+        if ans.len() > 2 {
+            let ans = cmd
+                .parse_answer(&ans)
+                .unwrap_or_else(|e| panic!("{:02x?}", e));
+            println!("answer: {:#02x?}", ans);
+        }
     }
 }
