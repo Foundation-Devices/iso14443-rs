@@ -13,13 +13,14 @@ mod rats;
 mod sak;
 pub mod vec;
 
-use anticol_select::{Cascade, NumberOfValidBits, UidCl};
+use anticol_select::{Cascade, UidCl};
+pub use anticol_select::{NumberOfValidBits, SEL_CL1, SEL_CL2, SEL_CL3};
 use atqa::AtqA;
 use ats::Ats;
 use crc::{append_crc_a, crc_a};
 use pps::{PpsParam, PpsResp};
 use rats::RatsParam;
-use sak::Sak;
+pub use sak::Sak;
 use vec::{FrameVec, VecExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

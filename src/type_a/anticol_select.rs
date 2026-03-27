@@ -41,32 +41,37 @@ impl TryFrom<&[u8]> for UidCl {
     }
 }
 
+/// SEL command codes for each cascade level (ISO14443-3 Table 6).
+pub const SEL_CL1: u8 = 0x93;
+pub const SEL_CL2: u8 = 0x95;
+pub const SEL_CL3: u8 = 0x97;
+
 /// Table 6 - Coding of SEL
 #[derive(Debug, Clone)]
 #[repr(u8)]
 pub enum Cascade {
-    Level1(UidCl) = 0x93,
-    Level2(UidCl) = 0x95,
-    Level3(UidCl) = 0x97,
+    Level1(UidCl) = SEL_CL1,
+    Level2(UidCl) = SEL_CL2,
+    Level3(UidCl) = SEL_CL3,
 }
 
 impl Cascade {
     pub(crate) fn check_sel(sel: u8) -> bool {
-        sel == 0x93 || sel == 0x95 || sel == 0x97
+        sel == SEL_CL1 || sel == SEL_CL2 || sel == SEL_CL3
     }
     pub(crate) fn try_from(sel: u8, uid_cl: &[u8; 5]) -> Result<Self, TypeAError> {
         match sel {
-            0x93 => Ok(Cascade::Level1(UidCl::try_from(uid_cl)?)),
-            0x95 => Ok(Cascade::Level2(UidCl::try_from(uid_cl)?)),
-            0x97 => Ok(Cascade::Level3(UidCl::try_from(uid_cl)?)),
+            SEL_CL1 => Ok(Cascade::Level1(UidCl::try_from(uid_cl)?)),
+            SEL_CL2 => Ok(Cascade::Level2(UidCl::try_from(uid_cl)?)),
+            SEL_CL3 => Ok(Cascade::Level3(UidCl::try_from(uid_cl)?)),
             _ => Err(TypeAError::UnknownOpcode(sel)),
         }
     }
     fn code(&self) -> u8 {
         match self {
-            Cascade::Level1(_) => 0x93,
-            Cascade::Level2(_) => 0x95,
-            Cascade::Level3(_) => 0x97,
+            Cascade::Level1(_) => SEL_CL1,
+            Cascade::Level2(_) => SEL_CL2,
+            Cascade::Level3(_) => SEL_CL3,
         }
     }
 
@@ -128,6 +133,24 @@ impl TryFrom<u8> for NumberOfValidBits {
 }
 
 impl NumberOfValidBits {
+    /// NVB for initial anticollision: 2 bytes valid (SEL + NVB), no UID bits
+    /// known yet. ISO14443-3 Table 7.
+    pub fn anticollision() -> Self {
+        Self {
+            byte_cnt: BoundedU8::new(2).unwrap(),
+            bit_cnt: BoundedU8::new(0).unwrap(),
+        }
+    }
+
+    /// NVB for SELECT: 7 bytes valid (SEL + NVB + UID[4] + BCC).
+    /// ISO14443-3 Table 7.
+    pub fn select() -> Self {
+        Self {
+            byte_cnt: BoundedU8::new(7).unwrap(),
+            bit_cnt: BoundedU8::new(0).unwrap(),
+        }
+    }
+
     pub(crate) fn has_40_data_bits(&self) -> bool {
         self.byte_cnt == 7 && self.bit_cnt == 0
     }
