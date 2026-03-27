@@ -1,5 +1,5 @@
 use bounded_integer::BoundedU8;
-use std::fmt;
+use core::fmt;
 
 mod anticol_select;
 mod atqa;
@@ -11,6 +11,7 @@ mod pps;
 mod protocol;
 mod rats;
 mod sak;
+pub mod vec;
 
 use anticol_select::{Cascade, NumberOfValidBits, UidCl};
 use atqa::AtqA;
@@ -19,6 +20,7 @@ use crc::{append_crc_a, crc_a};
 use pps::{PpsParam, PpsResp};
 use rats::RatsParam;
 use sak::Sak;
+use vec::{FrameVec, VecExt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeAError {
@@ -28,6 +30,7 @@ pub enum TypeAError {
     InvalidBcc,
     UnknownSel,
     InvalidPcb,
+    BufferFull,
     Other,
 }
 
@@ -77,19 +80,27 @@ impl Command {
         }
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
+    pub fn to_vec(&self) -> Result<FrameVec, TypeAError> {
         match self {
-            Command::ReqA => vec![0x26],
-            Command::WupA => vec![0x52],
+            Command::ReqA => {
+                let mut v = FrameVec::new();
+                v.try_push(0x26)?;
+                Ok(v)
+            }
+            Command::WupA => {
+                let mut v = FrameVec::new();
+                v.try_push(0x52)?;
+                Ok(v)
+            }
             Command::AntiCollision((cascade, nvb)) => cascade.raw(u8::from(nvb)),
-            Command::Select(cascade) => append_crc_a(cascade.raw(0x70).as_slice()),
+            Command::Select(cascade) => append_crc_a(cascade.raw(0x70)?.as_slice()),
             Command::HltA => append_crc_a(&[0x50, 0x00]),
             Command::Rats(param) => append_crc_a(&[0xe0, u8::from(param)]),
             Command::Pps(param) => {
                 append_crc_a(&[0xd0 + u8::from(&param.cid), 0x11, u8::from(param)])
             }
             Command::IBlock(block) | Command::RBlock(block) | Command::SBlock(block) => {
-                append_crc_a(&block.to_vec())
+                append_crc_a(&block.to_vec()?)
             }
         }
     }

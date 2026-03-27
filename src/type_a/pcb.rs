@@ -3,7 +3,7 @@
 
 use bitflags::bitflags;
 use bounded_integer::BoundedU8;
-use std::fmt;
+use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockType {
@@ -329,9 +329,6 @@ mod tests {
         for byte in 0u8..=255 {
             if let Ok(pcb) = Pcb::try_from(byte) {
                 let converted: u8 = pcb.clone().into();
-                if converted != byte {
-                    eprintln!("{:#02x?}", pcb);
-                }
                 assert_eq!(
                     byte, converted,
                     "Roundtrip failed for 0x{:02X}: got 0x{:02X}",

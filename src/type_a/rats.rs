@@ -1,6 +1,6 @@
 use bounded_integer::BoundedU8;
+use core::fmt;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use std::fmt;
 
 use super::{Cid, TypeAError};
 

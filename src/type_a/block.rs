@@ -1,18 +1,19 @@
 // SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::fmt;
+use core::fmt;
 
 use super::Cid;
 use super::crc::crc_a;
 use super::pcb::{BlockType, Pcb};
+use super::vec::{FrameVec, VecExt};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Block {
     pub pcb: Pcb,
     pub cid: Option<Cid>,
     pub nad: Option<u8>,
-    pub payload: Vec<u8>,
+    pub payload: FrameVec,
     pub crc: (u8, u8),
 }
 
@@ -26,7 +27,7 @@ impl fmt::Debug for Block {
             write!(f, ", NAD: {:?}", nad)?;
         }
         if !self.payload.is_empty() {
-            write!(f, ", DATA: {:02x?}", self.payload)?;
+            write!(f, ", DATA: {:02x?}", self.payload.as_slice())?;
         }
         Ok(())
     }
@@ -38,7 +39,7 @@ impl Block {
             pcb,
             cid: None,
             nad: None,
-            payload: Vec::new(),
+            payload: FrameVec::new(),
             crc: (0, 0),
         }
     }
@@ -53,7 +54,7 @@ impl Block {
         self
     }
 
-    pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
+    pub fn with_payload(mut self, payload: FrameVec) -> Self {
         self.payload = payload;
         self
     }
@@ -75,8 +76,8 @@ impl Block {
         self.pcb.block_type
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+    pub fn to_vec(&self) -> Result<FrameVec, super::TypeAError> {
+        let mut bytes = FrameVec::new();
 
         // Update PCB flags based on optional fields
         let mut pcb = self.pcb.clone();
@@ -84,35 +85,36 @@ impl Block {
         pcb = pcb.with_nad_following(self.nad.is_some());
 
         // Add PCB
-        bytes.push(u8::from(pcb));
+        bytes.try_push(u8::from(pcb))?;
 
         // Add CID if present
         if let Some(cid) = &self.cid {
-            bytes.push(cid.value()); // CID value in lower 4 bits, upper bits are 0 for PCD->PICC
+            bytes.try_push(cid.value())?;
         }
 
         // Add NAD if present
         if let Some(nad) = self.nad {
-            bytes.push(nad);
+            bytes.try_push(nad)?;
         }
 
         // Add payload
-        bytes.extend_from_slice(&self.payload);
+        bytes.try_extend(self.payload.as_slice())?;
 
         // Add CRC
-        bytes.extend_from_slice(&[self.crc.0, self.crc.1]);
+        bytes.try_push(self.crc.0)?;
+        bytes.try_push(self.crc.1)?;
 
-        bytes
+        Ok(bytes)
     }
 
-    pub fn calculate_crc(&self) -> (u8, u8) {
-        let data = self.to_vec();
-        crc_a(&data[..data.len() - 2])
+    pub fn calculate_crc(&self) -> Result<(u8, u8), super::TypeAError> {
+        let data = self.to_vec()?;
+        Ok(crc_a(&data[..data.len() - 2]))
     }
 
-    pub fn validate_crc(&self) -> bool {
-        let calculated = self.calculate_crc();
-        calculated == self.crc || self.crc == (0, 0) // Allow (0,0) for testing
+    pub fn validate_crc(&self) -> Result<bool, super::TypeAError> {
+        let calculated = self.calculate_crc()?;
+        Ok(calculated == self.crc || self.crc == (0, 0))
     }
 }
 
@@ -171,7 +173,8 @@ impl TryFrom<&[u8]> for Block {
         }
 
         let payload_end = data.len() - 2;
-        let payload = data[offset..payload_end].to_vec();
+        let mut payload = FrameVec::new();
+        payload.try_extend(&data[offset..payload_end])?;
         let crc = (data[payload_end], data[payload_end + 1]);
 
         let block = Self {
@@ -183,8 +186,10 @@ impl TryFrom<&[u8]> for Block {
         };
 
         // Validate CRC
-        if !block.validate_crc() {
-            return Err(crate::type_a::TypeAError::InvalidCrc(block.calculate_crc()));
+        if !block.validate_crc()? {
+            return Err(crate::type_a::TypeAError::InvalidCrc(
+                block.calculate_crc()?,
+            ));
         }
 
         Ok(block)
@@ -194,107 +199,101 @@ impl TryFrom<&[u8]> for Block {
 #[cfg(test)]
 mod tests {
     use super::super::pcb::{BlockType, Pcb};
+    use super::super::vec::{FrameVec, VecExt};
     use super::*;
+
+    fn frame_vec(data: &[u8]) -> FrameVec {
+        let mut v = FrameVec::new();
+        v.try_extend(data).unwrap();
+        v
+    }
 
     #[test]
     fn test_block_format_iblock_without_optional_fields() {
-        // Test I-block without CID or NAD
         let pcb = Pcb::new(BlockType::IBlock).with_block_number(0);
-        let block = Block::new(pcb).with_payload(vec![0x01, 0x02, 0x03]);
-        let bytes = block.to_vec();
+        let block = Block::new(pcb).with_payload(frame_vec(&[0x01, 0x02, 0x03]));
+        let bytes = block.to_vec().unwrap();
 
-        // Should be: PCB + payload + CRC
-        assert_eq!(bytes.len(), 6); // 1 PCB + 3 payload + 2 CRC
-        assert_eq!(bytes[0], 0x02); // I-block, block number 0
+        assert_eq!(bytes.len(), 6);
+        assert_eq!(bytes[0], 0x02);
         assert_eq!(&bytes[1..4], &[0x01, 0x02, 0x03]);
     }
 
     #[test]
     fn test_block_format_iblock_with_cid() {
-        // Test I-block with CID
         let pcb = Pcb::new(BlockType::IBlock).with_block_number(1);
         let cid = Cid::new(5).unwrap();
-        let block = Block::new(pcb).with_cid(cid).with_payload(vec![0x01, 0x02]);
-        let bytes = block.to_vec();
+        let block = Block::new(pcb)
+            .with_cid(cid)
+            .with_payload(frame_vec(&[0x01, 0x02]));
+        let bytes = block.to_vec().unwrap();
 
-        // Debug print
-        println!("bytes: {:?}", bytes);
-        println!("PCB byte: 0x{:02X}", bytes[0]);
-
-        // Should be: PCB + CID + payload + CRC
-        assert_eq!(bytes.len(), 6); // 1 PCB + 1 CID + 2 payload + 2 CRC
-        assert_eq!(bytes[0] & 0x08, 0x08); // CID following bit set
-        assert_eq!(bytes[1], 0x05); // CID value
+        assert_eq!(bytes.len(), 6);
+        assert_eq!(bytes[0] & 0x08, 0x08);
+        assert_eq!(bytes[1], 0x05);
         assert_eq!(&bytes[2..4], &[0x01, 0x02]);
     }
 
     #[test]
     fn test_block_format_iblock_with_cid_and_nad() {
-        // Test I-block with CID and NAD
         let pcb = Pcb::new(BlockType::IBlock).with_block_number(0);
         let cid = Cid::new(3).unwrap();
         let block = Block::new(pcb)
             .with_cid(cid)
             .with_nad(0x12)
-            .with_payload(vec![0x01]);
-        let bytes = block.to_vec();
+            .with_payload(frame_vec(&[0x01]));
+        let bytes = block.to_vec().unwrap();
 
-        // Should be: PCB + CID + NAD + payload + CRC
-        assert_eq!(bytes.len(), 6); // 1 PCB + 1 CID + 1 NAD + 1 payload + 2 CRC
-        assert_eq!(bytes[0] & 0x08, 0x08); // CID following bit set
-        assert_eq!(bytes[0] & 0x04, 0x04); // NAD following bit set
-        assert_eq!(bytes[1], 0x03); // CID value
-        assert_eq!(bytes[2], 0x12); // NAD value
-        assert_eq!(bytes[3], 0x01); // payload
+        assert_eq!(bytes.len(), 6);
+        assert_eq!(bytes[0] & 0x08, 0x08);
+        assert_eq!(bytes[0] & 0x04, 0x04);
+        assert_eq!(bytes[1], 0x03);
+        assert_eq!(bytes[2], 0x12);
+        assert_eq!(bytes[3], 0x01);
     }
 
     #[test]
     fn test_block_format_rblock_with_cid() {
-        // Test R-block with CID (no NAD allowed for R-blocks)
         let pcb = Pcb::new(BlockType::RBlock)
             .with_block_number(1)
             .with_r_subtype(super::super::pcb::RBlockSubtype::Ack);
         let cid = Cid::new(7).unwrap();
         let block = Block::new(pcb).with_cid(cid);
-        let bytes = block.to_vec();
+        let bytes = block.to_vec().unwrap();
 
-        // Should be: PCB + CID + CRC
-        assert_eq!(bytes.len(), 4); // 1 PCB + 1 CID + 2 CRC
-        assert_eq!(bytes[0] & 0x08, 0x08); // CID following bit set
-        assert_eq!(bytes[0] & 0x04, 0x00); // NAD following bit NOT set (not allowed for R-blocks)
-        assert_eq!(bytes[1], 0x07); // CID value
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(bytes[0] & 0x08, 0x08);
+        assert_eq!(bytes[0] & 0x04, 0x00);
+        assert_eq!(bytes[1], 0x07);
     }
 
     #[test]
     fn test_block_parsing_iblock_with_cid() {
-        // Test parsing I-block with CID
-        let data: &[u8] = &[0x0B, 0x05, 0x01, 0x02, 0x62, 0x95]; // PCB with CID following, CID=5, payload, CRC
+        let data: &[u8] = &[0x0B, 0x05, 0x01, 0x02, 0x62, 0x95];
 
         let block = Block::try_from(data).unwrap();
         assert_eq!(block.block_type(), BlockType::IBlock);
         assert_eq!(block.block_number(), 1);
         assert!(block.cid.is_some());
         assert_eq!(block.cid.unwrap().value(), 5);
-        assert_eq!(block.payload, vec![0x01, 0x02]);
+        assert_eq!(block.payload.as_slice(), &[0x01, 0x02]);
     }
 
     #[test]
     fn test_block_parsing_rblock_with_cid() {
-        // Test parsing R-block with CID
-        let data: &[u8] = &[0xAA, 0x03, 0xb4, 0x7e]; // PCB with CID following, CID=3, CRC
+        let data: &[u8] = &[0xAA, 0x03, 0xb4, 0x7e];
 
         let block = Block::try_from(data).unwrap();
         assert_eq!(block.block_type(), BlockType::RBlock);
         assert_eq!(block.block_number(), 0);
         assert!(block.cid.is_some());
         assert_eq!(block.cid.unwrap().value(), 3);
-        assert_eq!(block.payload, Vec::<u8>::new()); // R-blocks have no payload
+        assert!(block.payload.is_empty());
     }
 
     #[test]
     fn test_block_parsing_rejects_nad_without_cid() {
-        // Test that parsing rejects NAD when CID is not present
-        let data: &[u8] = &[0x07, 0x12, 0x00, 0x00]; // PCB with NAD following but no CID
+        let data: &[u8] = &[0x07, 0x12, 0x00, 0x00];
 
         let result = Block::try_from(data);
         assert!(result.is_err());
@@ -302,8 +301,7 @@ mod tests {
 
     #[test]
     fn test_block_parsing_rejects_nad_for_non_iblock() {
-        // Test that parsing rejects NAD for non-I-blocks
-        let data: &[u8] = &[0xAF, 0x03, 0x12, 0x00, 0x00]; // R-block PCB with CID and NAD following
+        let data: &[u8] = &[0xAF, 0x03, 0x12, 0x00, 0x00];
 
         let result = Block::try_from(data);
         assert!(result.is_err());

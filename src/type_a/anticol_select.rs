@@ -1,4 +1,8 @@
+// SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 use super::TypeAError;
+use super::vec::{FrameVec, VecExt};
 use bounded_integer::BoundedU8;
 
 /// 6.4.3 Anticollision and Select
@@ -74,27 +78,27 @@ impl Cascade {
         }
     }
 
-    pub(crate) fn raw(&self, nvb: u8) -> Vec<u8> {
-        let mut raw = Vec::with_capacity(7);
-        raw.push(self.code());
-        raw.push(nvb);
+    pub(crate) fn raw(&self, nvb: u8) -> Result<FrameVec, TypeAError> {
+        let mut raw = FrameVec::new();
+        raw.try_push(self.code())?;
+        raw.try_push(nvb)?;
         match self.uid_cl() {
             UidCl::Final(uid0, uid1, uid2, uid3) => {
-                raw.push(*uid0);
-                raw.push(*uid1);
-                raw.push(*uid2);
-                raw.push(*uid3);
-                raw.push(*uid0 ^ *uid1 ^ *uid2 ^ uid3);
+                raw.try_push(*uid0)?;
+                raw.try_push(*uid1)?;
+                raw.try_push(*uid2)?;
+                raw.try_push(*uid3)?;
+                raw.try_push(*uid0 ^ *uid1 ^ *uid2 ^ uid3)?;
             }
             UidCl::Next(uid0, uid1, uid2) => {
-                raw.push(0x88);
-                raw.push(*uid0);
-                raw.push(*uid1);
-                raw.push(*uid2);
-                raw.push(*uid0 ^ *uid1 ^ *uid2 ^ 0x88);
+                raw.try_push(0x88)?;
+                raw.try_push(*uid0)?;
+                raw.try_push(*uid1)?;
+                raw.try_push(*uid2)?;
+                raw.try_push(*uid0 ^ *uid1 ^ *uid2 ^ 0x88)?;
             }
         }
-        raw
+        Ok(raw)
     }
 }
 

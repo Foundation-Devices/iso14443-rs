@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use super::pcb::Pcb;
+use super::vec::{ChainVec, FrameVec, VecExt};
 use super::{Block, BlockType, RBlockSubtype, SBlockSubtype, TypeAError};
+
+#[cfg(feature = "alloc")]
+type BlocksVec = alloc::vec::Vec<Block>;
+#[cfg(not(feature = "alloc"))]
+type BlocksVec = heapless::Vec<Block, 16>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolState {
@@ -12,11 +18,11 @@ pub enum ProtocolState {
     },
     ReceivingChain {
         block_number: u8,
-        data: Vec<u8>,
+        data: ChainVec,
     },
     TransmittingChain {
         block_number: u8,
-        data: Vec<u8>,
+        data: ChainVec,
         position: usize,
     },
     Error(TypeAError),
@@ -24,8 +30,8 @@ pub enum ProtocolState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockChain {
-    pub blocks: Vec<Block>,
-    pub complete_data: Vec<u8>,
+    pub blocks: BlocksVec,
+    pub complete_data: ChainVec,
 }
 
 impl Default for BlockChain {
@@ -37,8 +43,8 @@ impl Default for BlockChain {
 impl BlockChain {
     pub fn new() -> Self {
         Self {
-            blocks: Vec::new(),
-            complete_data: Vec::new(),
+            blocks: BlocksVec::new(),
+            complete_data: ChainVec::new(),
         }
     }
 
@@ -47,13 +53,13 @@ impl BlockChain {
             BlockType::IBlock => {
                 if block.is_chaining() {
                     // This is a chained block
-                    self.blocks.push(block.clone());
-                    self.complete_data.extend_from_slice(&block.payload);
+                    self.complete_data.try_extend(block.payload.as_slice())?;
+                    self.blocks.try_push(block)?;
                     Ok(())
                 } else {
                     // This is the final block
-                    self.blocks.push(block.clone());
-                    self.complete_data.extend_from_slice(&block.payload);
+                    self.complete_data.try_extend(block.payload.as_slice())?;
+                    self.blocks.try_push(block)?;
                     Ok(())
                 }
             }
@@ -106,7 +112,7 @@ impl ProtocolHandler {
         self.current_block_number = 0;
     }
 
-    pub fn send_iblock(&mut self, payload: Vec<u8>, chaining: bool) -> Result<Block, TypeAError> {
+    pub fn send_iblock(&mut self, payload: FrameVec, chaining: bool) -> Result<Block, TypeAError> {
         let pcb = Pcb::new(BlockType::IBlock)
             .with_block_number(self.current_block_number)
             .with_chaining(chaining);
@@ -114,9 +120,11 @@ impl ProtocolHandler {
         let block = Block::new(pcb).with_payload(payload);
 
         if chaining {
+            let mut data = ChainVec::new();
+            data.try_extend(block.payload.as_slice())?;
             self.state = ProtocolState::TransmittingChain {
                 block_number: self.current_block_number,
-                data: block.payload.clone(),
+                data,
                 position: 0,
             };
         } else {
@@ -148,7 +156,7 @@ impl ProtocolHandler {
     pub fn send_sblock(
         &mut self,
         subtype: SBlockSubtype,
-        payload: Vec<u8>,
+        payload: FrameVec,
     ) -> Result<Block, TypeAError> {
         let pcb = Pcb::new(BlockType::SBlock).with_s_subtype(subtype);
         let block = Block::new(pcb).with_payload(payload);
@@ -157,7 +165,7 @@ impl ProtocolHandler {
         Ok(block)
     }
 
-    pub fn receive_block(&mut self, block: Block) -> Result<Option<Vec<u8>>, TypeAError> {
+    pub fn receive_block(&mut self, block: Block) -> Result<Option<ChainVec>, TypeAError> {
         match &self.state {
             ProtocolState::Idle => self.handle_idle_receive(block),
             ProtocolState::WaitingForAck { block_number } => {
@@ -174,20 +182,24 @@ impl ProtocolHandler {
         }
     }
 
-    fn handle_idle_receive(&mut self, block: Block) -> Result<Option<Vec<u8>>, TypeAError> {
+    fn handle_idle_receive(&mut self, block: Block) -> Result<Option<ChainVec>, TypeAError> {
         match block.block_type() {
             BlockType::IBlock => {
                 if block.is_chaining() {
                     // Start receiving a chain
+                    let mut data = ChainVec::new();
+                    data.try_extend(block.payload.as_slice())?;
                     self.block_chain.add_block(block.clone())?;
                     self.state = ProtocolState::ReceivingChain {
                         block_number: block.block_number(),
-                        data: block.payload.clone(),
+                        data,
                     };
                     Ok(None)
                 } else {
                     // Single block message
-                    Ok(Some(block.payload))
+                    let mut result = ChainVec::new();
+                    result.try_extend(block.payload.as_slice())?;
+                    Ok(Some(result))
                 }
             }
             BlockType::RBlock => {
@@ -215,7 +227,7 @@ impl ProtocolHandler {
         &mut self,
         block: Block,
         expected_block_number: u8,
-    ) -> Result<Option<Vec<u8>>, TypeAError> {
+    ) -> Result<Option<ChainVec>, TypeAError> {
         match block.block_type() {
             BlockType::RBlock => {
                 if block.block_number() == expected_block_number {
@@ -242,12 +254,12 @@ impl ProtocolHandler {
         &mut self,
         block: Block,
         expected_block_number: u8,
-        mut data: Vec<u8>,
-    ) -> Result<Option<Vec<u8>>, TypeAError> {
+        mut data: ChainVec,
+    ) -> Result<Option<ChainVec>, TypeAError> {
         match block.block_type() {
             BlockType::IBlock => {
                 if block.block_number() == expected_block_number {
-                    data.extend_from_slice(&block.payload);
+                    data.try_extend(block.payload.as_slice())?;
 
                     if block.is_chaining() {
                         // More blocks to come
@@ -258,7 +270,7 @@ impl ProtocolHandler {
                         Ok(None)
                     } else {
                         // Chain complete
-                        data.extend_from_slice(&block.payload);
+                        data.try_extend(block.payload.as_slice())?;
                         self.state = ProtocolState::Idle;
                         Ok(Some(data))
                     }
@@ -279,7 +291,14 @@ impl Default for ProtocolHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::super::vec::{FrameVec, VecExt};
     use super::*;
+
+    fn frame_vec(data: &[u8]) -> FrameVec {
+        let mut v = FrameVec::new();
+        v.try_extend(data).unwrap();
+        v
+    }
 
     #[test]
     fn test_protocol_handler_initialization() {
@@ -290,12 +309,12 @@ mod tests {
     #[test]
     fn test_send_single_iblock() {
         let mut handler = ProtocolHandler::new();
-        let payload = vec![0x01, 0x02, 0x03];
+        let payload = frame_vec(&[0x01, 0x02, 0x03]);
 
         let block = handler.send_iblock(payload.clone(), false).unwrap();
 
         assert_eq!(block.block_type(), BlockType::IBlock);
-        assert_eq!(block.payload, payload);
+        assert_eq!(block.payload.as_slice(), &[0x01, 0x02, 0x03]);
         assert!(!block.is_chaining());
         assert_eq!(
             handler.state(),
@@ -306,12 +325,12 @@ mod tests {
     #[test]
     fn test_send_chained_iblock() {
         let mut handler = ProtocolHandler::new();
-        let payload = vec![0x01, 0x02, 0x03];
+        let payload = frame_vec(&[0x01, 0x02, 0x03]);
 
         let block = handler.send_iblock(payload.clone(), true).unwrap();
 
         assert_eq!(block.block_type(), BlockType::IBlock);
-        assert_eq!(block.payload, payload);
+        assert_eq!(block.payload.as_slice(), &[0x01, 0x02, 0x03]);
         assert!(block.is_chaining());
         assert!(matches!(
             handler.state(),
@@ -342,7 +361,7 @@ mod tests {
     #[test]
     fn test_send_sblock_wtx() {
         let mut handler = ProtocolHandler::new();
-        let payload = vec![0x10]; // WTX parameter
+        let payload = frame_vec(&[0x10]);
         let block = handler.send_sblock(SBlockSubtype::Wtx, payload).unwrap();
 
         assert_eq!(block.block_type(), BlockType::SBlock);
@@ -353,11 +372,11 @@ mod tests {
     #[test]
     fn test_receive_single_iblock() {
         let mut handler = ProtocolHandler::new();
-        let payload = vec![0x01, 0x02, 0x03];
+        let payload = frame_vec(&[0x01, 0x02, 0x03]);
         let block = Block::new(Pcb::new(BlockType::IBlock)).with_payload(payload.clone());
 
         let result = handler.receive_block(block).unwrap();
-        assert_eq!(result, Some(payload));
+        assert_eq!(result.unwrap().as_slice(), &[0x01, 0x02, 0x03]);
         assert_eq!(handler.state(), &ProtocolState::Idle);
     }
 
@@ -367,17 +386,17 @@ mod tests {
 
         // Add first chained block
         let block1 = Block::new(Pcb::new(BlockType::IBlock).with_chaining(true))
-            .with_payload(vec![0x01, 0x02]);
+            .with_payload(frame_vec(&[0x01, 0x02]));
         chain.add_block(block1).unwrap();
         assert!(!chain.is_complete());
 
         // Add final block
         let block2 = Block::new(Pcb::new(BlockType::IBlock).with_chaining(false))
-            .with_payload(vec![0x03, 0x04]);
+            .with_payload(frame_vec(&[0x03, 0x04]));
         chain.add_block(block2).unwrap();
         assert!(chain.is_complete());
 
-        assert_eq!(chain.complete_data, vec![0x01, 0x02, 0x03, 0x04]);
+        assert_eq!(chain.complete_data.as_slice(), &[0x01, 0x02, 0x03, 0x04]);
     }
 
     #[test]
@@ -385,7 +404,7 @@ mod tests {
         let mut handler = ProtocolHandler::new();
 
         // Put handler in some state
-        let _ = handler.send_iblock(vec![0x01], true);
+        let _ = handler.send_iblock(frame_vec(&[0x01]), true);
 
         // Reset
         handler.reset();

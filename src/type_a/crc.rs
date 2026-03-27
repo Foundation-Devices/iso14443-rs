@@ -1,3 +1,9 @@
+// SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use super::TypeAError;
+use super::vec::{FrameVec, VecExt};
+
 /// 6.1.6 CRC_A
 pub(crate) fn crc_a(data: &[u8]) -> (u8, u8) {
     const POLY: u16 = 0x8408;
@@ -17,13 +23,13 @@ pub(crate) fn crc_a(data: &[u8]) -> (u8, u8) {
     (((crc & 0x00FF) as u8), ((crc >> 8) as u8))
 }
 
-pub(crate) fn append_crc_a(data: &[u8]) -> Vec<u8> {
+pub(crate) fn append_crc_a(data: &[u8]) -> Result<FrameVec, TypeAError> {
     let (lsb, msb) = crc_a(data);
-    let mut res = Vec::with_capacity(data.len() + 2);
-    res.extend_from_slice(data);
-    res.push(lsb);
-    res.push(msb);
-    res
+    let mut res = FrameVec::new();
+    res.try_extend(data)?;
+    res.try_push(lsb)?;
+    res.try_push(msb)?;
+    Ok(res)
 }
 
 #[cfg(test)]
@@ -32,12 +38,18 @@ mod tests {
 
     #[test]
     fn crc_a_ex1() {
-        assert_eq!(append_crc_a(&[0x00, 0x00]), vec![0x00, 0x00, 0xA0, 0x1E]);
+        assert_eq!(
+            append_crc_a(&[0x00, 0x00]).unwrap().as_slice(),
+            &[0x00, 0x00, 0xA0, 0x1E]
+        );
     }
 
     #[test]
     fn crc_a_ex2() {
-        assert_eq!(append_crc_a(&[0x12, 0x34]), vec![0x12, 0x34, 0x26, 0xCF]);
+        assert_eq!(
+            append_crc_a(&[0x12, 0x34]).unwrap().as_slice(),
+            &[0x12, 0x34, 0x26, 0xCF]
+        );
     }
 
     #[test]

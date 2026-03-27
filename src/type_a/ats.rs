@@ -1,9 +1,15 @@
-use std::fmt;
-use std::time::Duration;
+// SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
+// SPDX-License-Identifier: GPL-3.0-or-later
 
+use core::fmt;
+
+use super::vec::{FrameVec, VecExt};
 use super::{TypeAError, crc::crc_a};
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+
+#[cfg(feature = "std")]
+use std::time::Duration;
 
 /// ISO/IEC 14443-4
 /// 5.2 Answer to select
@@ -14,7 +20,7 @@ pub struct Ats {
     pub ta: Ta,
     pub tb: Tb,
     pub tc: Tc,
-    pub historical_bytes: Vec<u8>,
+    pub historical_bytes: FrameVec,
 }
 
 impl TryFrom<&[u8]> for Ats {
@@ -65,8 +71,8 @@ impl TryFrom<&[u8]> for Ats {
             Ok(Tc::default())
         }?;
         let historical_bytes_len = value.len() - offset - 2;
-        let mut historical_bytes = Vec::with_capacity(historical_bytes_len);
-        historical_bytes.extend_from_slice(&value[offset..offset + historical_bytes_len]);
+        let mut historical_bytes = FrameVec::new();
+        historical_bytes.try_extend(&value[offset..offset + historical_bytes_len])?;
         offset += historical_bytes_len;
         if value.len() == offset + 2 {
             let crc1 = value[offset];
@@ -205,6 +211,7 @@ impl TryFrom<u8> for Sfgi {
     }
 }
 
+#[cfg(feature = "std")]
 impl Sfgi {
     /// The SFGT defines a specific guard time needed by the PICC before it is ready to receive the next frame after it has sent the ATS.
     pub fn sfgt(&self) -> Duration {
@@ -217,9 +224,17 @@ impl Sfgi {
     }
 }
 
+#[cfg(feature = "std")]
 impl fmt::Debug for Sfgi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} -> SFGT({:?})", self.0, self.sfgt())
+    }
+}
+
+#[cfg(not(feature = "std"))]
+impl fmt::Debug for Sfgi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "SFGI({})", self.0)
     }
 }
 
@@ -244,14 +259,23 @@ impl Default for Fwi {
     }
 }
 
+#[cfg(feature = "std")]
 impl fmt::Debug for Fwi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} -> FWT({:?})", self.0, self.fwt())
     }
 }
 
+#[cfg(not(feature = "std"))]
+impl fmt::Debug for Fwi {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FWI({})", self.0)
+    }
+}
+
 /// FWT is calculated by the following formula:
 /// FWT = (256 x 16 / fc) x 2^FWI
+#[cfg(feature = "std")]
 impl Fwi {
     pub fn fwt(&self) -> Duration {
         Duration::from_micros((256.0 * 16.0 / 13.56) as u64 * (1 << self.0) as u64)
@@ -276,7 +300,7 @@ impl Default for Tc {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 

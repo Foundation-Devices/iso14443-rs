@@ -3,17 +3,25 @@
 
 [package]
 edition = "2024"
-keywords = ["nfc"]
+categories = ["embedded", "no-std"]
+description = "ISO/IEC 14443 NFC/RFID protocol implementation"
+keywords = ["nfc", "rfid", "iso14443", "no-std", "embedded"]
 license = "GPL-3.0-or-later"
 name = "iso14443"
 repository = "https://github.com/Foundation-Devices/iso14443-rs"
 rust-version = "1.88.0"
 version = "0.1.0"
 
+[features]
+default = []
+alloc = []
+std = ["alloc"]
+
 [dependencies]
 bitflags = "2.9"
 bounded-integer = { version = "0.6", features = ["num-traits02"] }
-num_enum = "0.7"
+heapless = "0.9"
+num_enum = { version = "0.7", default-features = false }
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
