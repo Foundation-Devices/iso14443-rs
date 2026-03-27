@@ -8,6 +8,9 @@
   # https://devenv.sh/languages/
   languages.rust.enable = true;
 
+  # https://devenv.sh/packages/
+  packages = [ pkgs.cargo-msrv pkgs.cargo-sort ];
+
   # https://devenv.sh/git-hooks/
   git-hooks.hooks = {
     rustfmt.enable = true;
