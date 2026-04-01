@@ -9,6 +9,20 @@ use super::{Cid, TypeAError};
 /// Figure 3 - Coding of RATS paramter byte
 pub struct RatsParam(Fsdi, Cid);
 
+impl RatsParam {
+    pub fn new(fsdi: Fsdi, cid: Cid) -> Self {
+        Self(fsdi, cid)
+    }
+
+    pub fn fsdi(&self) -> Fsdi {
+        self.0
+    }
+
+    pub fn cid(&self) -> &Cid {
+        &self.1
+    }
+}
+
 impl From<&RatsParam> for u8 {
     fn from(value: &RatsParam) -> Self {
         ((value.0 as u8) << 4) | (value.1.0)

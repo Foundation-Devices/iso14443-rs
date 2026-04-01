@@ -1,282 +1,189 @@
 // SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+//! Generic ISO14443-4 block protocol handler.
+//!
+//! Role-agnostic: manages block numbering, block construction (with optional
+//! CID), and chain accumulation. Returns [`Action`]s that the caller (PCD or
+//! PICC transport layer) must execute.
+
 use super::pcb::Pcb;
 use super::vec::{ChainVec, FrameVec, VecExt};
-use super::{Block, BlockType, RBlockSubtype, SBlockSubtype, TypeAError};
+use super::{Block, BlockType, Cid, RBlockSubtype, SBlockSubtype, TypeAError};
 
-#[cfg(feature = "alloc")]
-type BlocksVec = alloc::vec::Vec<Block>;
-#[cfg(not(feature = "alloc"))]
-type BlocksVec = heapless::Vec<Block, 16>;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProtocolState {
-    Idle,
-    WaitingForAck {
-        block_number: u8,
-    },
-    ReceivingChain {
-        block_number: u8,
-        data: ChainVec,
-    },
-    TransmittingChain {
-        block_number: u8,
-        data: ChainVec,
-        position: usize,
-    },
-    Error(TypeAError),
+/// Action the caller must take after processing a received block.
+#[derive(Debug)]
+pub enum Action {
+    /// The received I-Block completes the exchange (single block or final
+    /// block of a chain). The assembled payload is returned.
+    Complete(ChainVec),
+    /// The caller must send this block to continue the protocol:
+    /// R(ACK) during chaining, S(WTX) echo, or S(DESELECT) echo.
+    Reply(Block),
+    /// R(ACK) received with matching block number during our chaining.
+    /// Caller should send the next chained I-Block.
+    ChainingAck,
+    /// R(ACK) received with non-matching block number during our chaining.
+    /// Caller should retransmit the last I-Block.
+    ChainingRetransmit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockChain {
-    pub blocks: BlocksVec,
-    pub complete_data: ChainVec,
-}
-
-impl Default for BlockChain {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl BlockChain {
-    pub fn new() -> Self {
-        Self {
-            blocks: BlocksVec::new(),
-            complete_data: ChainVec::new(),
-        }
-    }
-
-    pub fn add_block(&mut self, block: Block) -> Result<(), TypeAError> {
-        match block.block_type() {
-            BlockType::IBlock => {
-                if block.is_chaining() {
-                    // This is a chained block
-                    self.complete_data.try_extend(block.payload.as_slice())?;
-                    self.blocks.try_push(block)?;
-                    Ok(())
-                } else {
-                    // This is the final block
-                    self.complete_data.try_extend(block.payload.as_slice())?;
-                    self.blocks.try_push(block)?;
-                    Ok(())
-                }
-            }
-            _ => Err(TypeAError::Other),
-        }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        if self.blocks.is_empty() {
-            return false;
-        }
-
-        // Check if the last block is not chaining
-        if let Some(last_block) = self.blocks.last() {
-            !last_block.is_chaining()
-        } else {
-            false
-        }
-    }
-
-    pub fn reset(&mut self) {
-        self.blocks.clear();
-        self.complete_data.clear();
-    }
-}
-
+/// Generic ISO14443-4 block protocol state.
+///
+/// Tracks block numbering, optional CID, and chain accumulation.
+/// Both PCD and PICC transport layers use this for the shared block-level
+/// protocol, adding their role-specific logic (I/O, CRC, error recovery)
+/// on top.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolHandler {
-    state: ProtocolState,
-    block_chain: BlockChain,
-    current_block_number: u8,
+    cid: Option<Cid>,
+    block_number: u8,
+    chain: ChainVec,
 }
 
 impl ProtocolHandler {
-    pub fn new() -> Self {
+    pub fn new(cid: Option<Cid>) -> Self {
         Self {
-            state: ProtocolState::Idle,
-            block_chain: BlockChain::new(),
-            current_block_number: 0,
+            cid,
+            block_number: 0,
+            chain: ChainVec::new(),
         }
     }
 
-    pub fn state(&self) -> &ProtocolState {
-        &self.state
+    pub fn block_number(&self) -> u8 {
+        self.block_number
+    }
+
+    pub fn toggle_block_number(&mut self) {
+        self.block_number = 1 - self.block_number;
     }
 
     pub fn reset(&mut self) {
-        self.state = ProtocolState::Idle;
-        self.block_chain.reset();
-        self.current_block_number = 0;
+        self.block_number = 0;
+        self.chain.clear();
     }
 
-    pub fn send_iblock(&mut self, payload: FrameVec, chaining: bool) -> Result<Block, TypeAError> {
+    /// Reset chain accumulator between exchanges.
+    pub fn reset_chain(&mut self) {
+        self.chain.clear();
+    }
+
+    // ── Block builders ──────────────────────────────────────────────────
+
+    pub fn build_iblock(&self, payload: &[u8], chaining: bool) -> Result<Block, TypeAError> {
         let pcb = Pcb::new(BlockType::IBlock)
-            .with_block_number(self.current_block_number)
+            .with_block_number(self.block_number)
             .with_chaining(chaining);
-
-        let block = Block::new(pcb).with_payload(payload);
-
-        if chaining {
-            let mut data = ChainVec::new();
-            data.try_extend(block.payload.as_slice())?;
-            self.state = ProtocolState::TransmittingChain {
-                block_number: self.current_block_number,
-                data,
-                position: 0,
-            };
-        } else {
-            self.state = ProtocolState::WaitingForAck {
-                block_number: self.current_block_number,
-            };
+        let mut block = Block::new(pcb);
+        if let Some(cid) = self.cid {
+            block = block.with_cid(cid);
         }
-
-        self.current_block_number = 1 - self.current_block_number; // Toggle block number
-        Ok(block)
+        let mut p = FrameVec::new();
+        p.try_extend(payload)?;
+        Ok(block.with_payload(p))
     }
 
-    pub fn send_rblock(&mut self, ack: bool) -> Result<Block, TypeAError> {
-        let subtype = if ack {
-            RBlockSubtype::Ack
-        } else {
-            RBlockSubtype::Nak
-        };
+    pub fn build_rack(&self) -> Result<Block, TypeAError> {
         let pcb = Pcb::new(BlockType::RBlock)
-            .with_block_number(self.current_block_number)
-            .with_r_subtype(subtype);
-
-        let block = Block::new(pcb);
-
-        self.state = ProtocolState::Idle;
+            .with_block_number(self.block_number)
+            .with_r_subtype(RBlockSubtype::Ack);
+        let mut block = Block::new(pcb);
+        if let Some(cid) = self.cid {
+            block = block.with_cid(cid);
+        }
         Ok(block)
     }
 
-    pub fn send_sblock(
-        &mut self,
-        subtype: SBlockSubtype,
-        payload: FrameVec,
-    ) -> Result<Block, TypeAError> {
+    pub fn build_rnak(&self) -> Result<Block, TypeAError> {
+        let pcb = Pcb::new(BlockType::RBlock)
+            .with_block_number(self.block_number)
+            .with_r_subtype(RBlockSubtype::Nak);
+        let mut block = Block::new(pcb);
+        if let Some(cid) = self.cid {
+            block = block.with_cid(cid);
+        }
+        Ok(block)
+    }
+
+    pub fn build_sblock(&self, subtype: SBlockSubtype) -> Result<Block, TypeAError> {
         let pcb = Pcb::new(BlockType::SBlock).with_s_subtype(subtype);
-        let block = Block::new(pcb).with_payload(payload);
-
-        self.state = ProtocolState::Idle;
+        let mut block = Block::new(pcb);
+        if let Some(cid) = self.cid {
+            block = block.with_cid(cid);
+        }
         Ok(block)
     }
 
-    pub fn receive_block(&mut self, block: Block) -> Result<Option<ChainVec>, TypeAError> {
-        match &self.state {
-            ProtocolState::Idle => self.handle_idle_receive(block),
-            ProtocolState::WaitingForAck { block_number } => {
-                self.handle_waiting_for_ack(block, *block_number)
-            }
-            ProtocolState::ReceivingChain { block_number, data } => {
-                self.handle_receiving_chain(block, *block_number, data.clone())
-            }
-            ProtocolState::TransmittingChain { .. } => {
-                // Should not receive blocks while transmitting
-                Err(TypeAError::Other)
-            }
-            ProtocolState::Error(_) => Err(TypeAError::Other),
+    pub fn build_wtx_response(&self, request: &Block) -> Result<Block, TypeAError> {
+        let pcb = Pcb::new(BlockType::SBlock).with_s_subtype(SBlockSubtype::Wtx);
+        let mut block = Block::new(pcb);
+        if let Some(cid) = self.cid {
+            block = block.with_cid(cid);
+        }
+        Ok(block.with_payload(request.payload.clone()))
+    }
+
+    // ── Incoming block processing ───────────────────────────────────────
+
+    /// Process a received block and return the action the caller must take.
+    ///
+    /// Handles:
+    /// - I-Block (single or chained) → accumulate, return [`Action::Complete`]
+    ///   or [`Action::Reply`] with R(ACK).
+    /// - R(ACK) → return [`Action::ChainingAck`] or
+    ///   [`Action::ChainingRetransmit`] based on block number match.
+    /// - S(WTX) → return [`Action::Reply`] with S(WTX) echo.
+    /// - S(DESELECT) → return [`Action::Reply`] with S(DESELECT) echo, reset.
+    pub fn process_received(&mut self, block: Block) -> Result<Action, TypeAError> {
+        match block.block_type() {
+            BlockType::IBlock => self.process_iblock(block),
+            BlockType::RBlock => self.process_rblock(block),
+            BlockType::SBlock => self.process_sblock(block),
         }
     }
 
-    fn handle_idle_receive(&mut self, block: Block) -> Result<Option<ChainVec>, TypeAError> {
-        match block.block_type() {
-            BlockType::IBlock => {
-                if block.is_chaining() {
-                    // Start receiving a chain
-                    let mut data = ChainVec::new();
-                    data.try_extend(block.payload.as_slice())?;
-                    self.block_chain.add_block(block.clone())?;
-                    self.state = ProtocolState::ReceivingChain {
-                        block_number: block.block_number(),
-                        data,
-                    };
-                    Ok(None)
-                } else {
-                    // Single block message
-                    let mut result = ChainVec::new();
-                    result.try_extend(block.payload.as_slice())?;
-                    Ok(Some(result))
-                }
-            }
-            BlockType::RBlock => {
-                // Unexpected R-block in idle state
-                Err(TypeAError::Other)
-            }
-            BlockType::SBlock => {
-                // Handle S-block (like WTX, DESELECT)
-                match block.pcb.s_subtype {
-                    Some(SBlockSubtype::Deselect) => {
-                        self.reset();
-                        Ok(None)
-                    }
-                    Some(SBlockSubtype::Wtx) => {
-                        // Handle waiting time extension
-                        Ok(None)
-                    }
-                    _ => Err(TypeAError::Other),
-                }
-            }
+    fn process_iblock(&mut self, block: Block) -> Result<Action, TypeAError> {
+        self.chain.try_extend(block.payload.as_slice())?;
+        self.toggle_block_number();
+
+        if block.is_chaining() {
+            let rack = self.build_rack()?;
+            Ok(Action::Reply(rack))
+        } else {
+            let mut data = ChainVec::new();
+            core::mem::swap(&mut data, &mut self.chain);
+            Ok(Action::Complete(data))
         }
     }
 
-    fn handle_waiting_for_ack(
-        &mut self,
-        block: Block,
-        expected_block_number: u8,
-    ) -> Result<Option<ChainVec>, TypeAError> {
-        match block.block_type() {
-            BlockType::RBlock => {
-                if block.block_number() == expected_block_number {
-                    match block.pcb.r_subtype {
-                        Some(RBlockSubtype::Ack) => {
-                            self.state = ProtocolState::Idle;
-                            Ok(None) // ACK received, transmission successful
-                        }
-                        Some(RBlockSubtype::Nak) => {
-                            self.state = ProtocolState::Error(TypeAError::Other);
-                            Err(TypeAError::Other) // NAK received, transmission failed
-                        }
-                        None => Err(TypeAError::Other),
-                    }
+    fn process_rblock(&mut self, block: Block) -> Result<Action, TypeAError> {
+        match block.pcb.r_subtype {
+            Some(RBlockSubtype::Ack) => {
+                if block.block_number() == self.block_number {
+                    self.toggle_block_number();
+                    Ok(Action::ChainingAck)
                 } else {
-                    Err(TypeAError::Other) // Wrong block number
+                    Ok(Action::ChainingRetransmit)
                 }
             }
-            _ => Err(TypeAError::Other),
+            Some(RBlockSubtype::Nak) => {
+                // NAK → caller should retransmit last block
+                Ok(Action::ChainingRetransmit)
+            }
+            None => Err(TypeAError::InvalidPcb),
         }
     }
 
-    fn handle_receiving_chain(
-        &mut self,
-        block: Block,
-        expected_block_number: u8,
-        mut data: ChainVec,
-    ) -> Result<Option<ChainVec>, TypeAError> {
-        match block.block_type() {
-            BlockType::IBlock => {
-                if block.block_number() == expected_block_number {
-                    data.try_extend(block.payload.as_slice())?;
-
-                    if block.is_chaining() {
-                        // More blocks to come
-                        self.state = ProtocolState::ReceivingChain {
-                            block_number: 1 - expected_block_number,
-                            data,
-                        };
-                        Ok(None)
-                    } else {
-                        // Chain complete
-                        data.try_extend(block.payload.as_slice())?;
-                        self.state = ProtocolState::Idle;
-                        Ok(Some(data))
-                    }
-                } else {
-                    Err(TypeAError::Other) // Wrong block number
-                }
+    fn process_sblock(&mut self, block: Block) -> Result<Action, TypeAError> {
+        match block.pcb.s_subtype {
+            Some(SBlockSubtype::Wtx) => {
+                let resp = self.build_wtx_response(&block)?;
+                Ok(Action::Reply(resp))
+            }
+            Some(SBlockSubtype::Deselect) => {
+                let resp = self.build_sblock(SBlockSubtype::Deselect)?;
+                self.reset();
+                Ok(Action::Reply(resp))
             }
             _ => Err(TypeAError::Other),
         }
@@ -285,12 +192,13 @@ impl ProtocolHandler {
 
 impl Default for ProtocolHandler {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::pcb::Pcb;
     use super::super::vec::{FrameVec, VecExt};
     use super::*;
 
@@ -300,115 +208,210 @@ mod tests {
         v
     }
 
-    #[test]
-    fn test_protocol_handler_initialization() {
-        let handler = ProtocolHandler::new();
-        assert_eq!(handler.state(), &ProtocolState::Idle);
+    fn iblock(block_number: u8, payload: &[u8], chaining: bool) -> Block {
+        let pcb = Pcb::new(BlockType::IBlock)
+            .with_block_number(block_number)
+            .with_chaining(chaining);
+        Block::new(pcb).with_payload(frame_vec(payload))
     }
 
-    #[test]
-    fn test_send_single_iblock() {
-        let mut handler = ProtocolHandler::new();
-        let payload = frame_vec(&[0x01, 0x02, 0x03]);
+    fn rack(block_number: u8) -> Block {
+        let pcb = Pcb::new(BlockType::RBlock)
+            .with_block_number(block_number)
+            .with_r_subtype(RBlockSubtype::Ack);
+        Block::new(pcb)
+    }
 
-        let block = handler.send_iblock(payload.clone(), false).unwrap();
+    fn rnak(block_number: u8) -> Block {
+        let pcb = Pcb::new(BlockType::RBlock)
+            .with_block_number(block_number)
+            .with_r_subtype(RBlockSubtype::Nak);
+        Block::new(pcb)
+    }
+
+    fn sblock_wtx(wtxm: u8) -> Block {
+        let pcb = Pcb::new(BlockType::SBlock).with_s_subtype(SBlockSubtype::Wtx);
+        Block::new(pcb).with_payload(frame_vec(&[wtxm]))
+    }
+
+    fn sblock_deselect() -> Block {
+        let pcb = Pcb::new(BlockType::SBlock).with_s_subtype(SBlockSubtype::Deselect);
+        Block::new(pcb)
+    }
+
+    // ── Block builder tests ─────────────────────────────────────────────
+
+    #[test]
+    fn build_iblock_with_cid() {
+        let handler = ProtocolHandler::new(Some(Cid::new(3).unwrap()));
+        let block = handler.build_iblock(&[0x01, 0x02], false).unwrap();
 
         assert_eq!(block.block_type(), BlockType::IBlock);
-        assert_eq!(block.payload.as_slice(), &[0x01, 0x02, 0x03]);
+        assert_eq!(block.block_number(), 0);
         assert!(!block.is_chaining());
-        assert_eq!(
-            handler.state(),
-            &ProtocolState::WaitingForAck { block_number: 0 }
-        );
+        assert_eq!(block.cid.unwrap().value(), 3);
+        assert_eq!(block.payload.as_slice(), &[0x01, 0x02]);
     }
 
     #[test]
-    fn test_send_chained_iblock() {
-        let mut handler = ProtocolHandler::new();
-        let payload = frame_vec(&[0x01, 0x02, 0x03]);
+    fn build_iblock_without_cid() {
+        let handler = ProtocolHandler::new(None);
+        let block = handler.build_iblock(&[0xAA], true).unwrap();
 
-        let block = handler.send_iblock(payload.clone(), true).unwrap();
-
-        assert_eq!(block.block_type(), BlockType::IBlock);
-        assert_eq!(block.payload.as_slice(), &[0x01, 0x02, 0x03]);
+        assert!(block.cid.is_none());
         assert!(block.is_chaining());
-        assert!(matches!(
-            handler.state(),
-            ProtocolState::TransmittingChain { .. }
-        ));
     }
 
     #[test]
-    fn test_send_rblock_ack() {
-        let mut handler = ProtocolHandler::new();
-        let block = handler.send_rblock(true).unwrap();
+    fn build_rack_with_correct_block_number() {
+        let mut handler = ProtocolHandler::new(None);
+        handler.toggle_block_number();
+        let block = handler.build_rack().unwrap();
 
         assert_eq!(block.block_type(), BlockType::RBlock);
         assert_eq!(block.pcb.r_subtype, Some(RBlockSubtype::Ack));
-        assert_eq!(handler.state(), &ProtocolState::Idle);
+        assert_eq!(block.block_number(), 1);
     }
 
     #[test]
-    fn test_send_rblock_nak() {
-        let mut handler = ProtocolHandler::new();
-        let block = handler.send_rblock(false).unwrap();
+    fn build_rnak_with_cid() {
+        let handler = ProtocolHandler::new(Some(Cid::new(7).unwrap()));
+        let block = handler.build_rnak().unwrap();
 
-        assert_eq!(block.block_type(), BlockType::RBlock);
         assert_eq!(block.pcb.r_subtype, Some(RBlockSubtype::Nak));
-        assert_eq!(handler.state(), &ProtocolState::Idle);
+        assert_eq!(block.cid.unwrap().value(), 7);
     }
 
     #[test]
-    fn test_send_sblock_wtx() {
-        let mut handler = ProtocolHandler::new();
-        let payload = frame_vec(&[0x10]);
-        let block = handler.send_sblock(SBlockSubtype::Wtx, payload).unwrap();
+    fn build_wtx_response_echoes_payload() {
+        let handler = ProtocolHandler::new(None);
+        let request = sblock_wtx(0x05);
+        let response = handler.build_wtx_response(&request).unwrap();
 
-        assert_eq!(block.block_type(), BlockType::SBlock);
-        assert_eq!(block.pcb.s_subtype, Some(SBlockSubtype::Wtx));
-        assert_eq!(handler.state(), &ProtocolState::Idle);
+        assert_eq!(response.block_type(), BlockType::SBlock);
+        assert_eq!(response.pcb.s_subtype, Some(SBlockSubtype::Wtx));
+        assert_eq!(response.payload.as_slice(), &[0x05]);
+    }
+
+    // ── Receive processing tests ────────────────────────────────────────
+
+    #[test]
+    fn receive_single_iblock() {
+        let mut handler = ProtocolHandler::new(None);
+        let block = iblock(0, &[0x01, 0x02, 0x03], false);
+
+        match handler.process_received(block).unwrap() {
+            Action::Complete(data) => assert_eq!(data.as_slice(), &[0x01, 0x02, 0x03]),
+            other => panic!("expected Complete, got {:?}", other),
+        }
+        // Block number toggled
+        assert_eq!(handler.block_number(), 1);
     }
 
     #[test]
-    fn test_receive_single_iblock() {
-        let mut handler = ProtocolHandler::new();
-        let payload = frame_vec(&[0x01, 0x02, 0x03]);
-        let block = Block::new(Pcb::new(BlockType::IBlock)).with_payload(payload.clone());
+    fn receive_chained_iblocks() {
+        let mut handler = ProtocolHandler::new(None);
 
-        let result = handler.receive_block(block).unwrap();
-        assert_eq!(result.unwrap().as_slice(), &[0x01, 0x02, 0x03]);
-        assert_eq!(handler.state(), &ProtocolState::Idle);
+        // First chained I-Block
+        let block1 = iblock(0, &[0x01, 0x02], true);
+        match handler.process_received(block1).unwrap() {
+            Action::Reply(reply) => {
+                assert_eq!(reply.block_type(), BlockType::RBlock);
+                assert_eq!(reply.pcb.r_subtype, Some(RBlockSubtype::Ack));
+            }
+            other => panic!("expected Reply(R(ACK)), got {:?}", other),
+        }
+        assert_eq!(handler.block_number(), 1);
+
+        // Final I-Block
+        let block2 = iblock(1, &[0x03, 0x04], false);
+        match handler.process_received(block2).unwrap() {
+            Action::Complete(data) => assert_eq!(data.as_slice(), &[0x01, 0x02, 0x03, 0x04]),
+            other => panic!("expected Complete, got {:?}", other),
+        }
     }
 
     #[test]
-    fn test_block_chain_operations() {
-        let mut chain = BlockChain::new();
-
-        // Add first chained block
-        let block1 = Block::new(Pcb::new(BlockType::IBlock).with_chaining(true))
-            .with_payload(frame_vec(&[0x01, 0x02]));
-        chain.add_block(block1).unwrap();
-        assert!(!chain.is_complete());
-
-        // Add final block
-        let block2 = Block::new(Pcb::new(BlockType::IBlock).with_chaining(false))
-            .with_payload(frame_vec(&[0x03, 0x04]));
-        chain.add_block(block2).unwrap();
-        assert!(chain.is_complete());
-
-        assert_eq!(chain.complete_data.as_slice(), &[0x01, 0x02, 0x03, 0x04]);
+    fn receive_rack_matching_block_number() {
+        let mut handler = ProtocolHandler::new(None);
+        // block_number is 0, R(ACK) with 0 → ChainingAck, toggle to 1
+        let block = rack(0);
+        match handler.process_received(block).unwrap() {
+            Action::ChainingAck => {}
+            other => panic!("expected ChainingAck, got {:?}", other),
+        }
+        assert_eq!(handler.block_number(), 1);
     }
 
     #[test]
-    fn test_protocol_reset() {
-        let mut handler = ProtocolHandler::new();
+    fn receive_rack_wrong_block_number() {
+        let mut handler = ProtocolHandler::new(None);
+        // block_number is 0, R(ACK) with 1 → ChainingRetransmit
+        let block = rack(1);
+        match handler.process_received(block).unwrap() {
+            Action::ChainingRetransmit => {}
+            other => panic!("expected ChainingRetransmit, got {:?}", other),
+        }
+        // Block number unchanged
+        assert_eq!(handler.block_number(), 0);
+    }
 
-        // Put handler in some state
-        let _ = handler.send_iblock(frame_vec(&[0x01]), true);
+    #[test]
+    fn receive_rnak() {
+        let mut handler = ProtocolHandler::new(None);
+        let block = rnak(0);
+        match handler.process_received(block).unwrap() {
+            Action::ChainingRetransmit => {}
+            other => panic!("expected ChainingRetransmit, got {:?}", other),
+        }
+    }
 
-        // Reset
+    #[test]
+    fn receive_wtx_returns_reply() {
+        let mut handler = ProtocolHandler::new(None);
+        let block = sblock_wtx(0x03);
+        match handler.process_received(block).unwrap() {
+            Action::Reply(reply) => {
+                assert_eq!(reply.block_type(), BlockType::SBlock);
+                assert_eq!(reply.pcb.s_subtype, Some(SBlockSubtype::Wtx));
+                assert_eq!(reply.payload.as_slice(), &[0x03]);
+            }
+            other => panic!("expected Reply(S(WTX)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn receive_deselect_resets() {
+        let mut handler = ProtocolHandler::new(None);
+        handler.toggle_block_number(); // block_number = 1
+
+        let block = sblock_deselect();
+        match handler.process_received(block).unwrap() {
+            Action::Reply(reply) => {
+                assert_eq!(reply.block_type(), BlockType::SBlock);
+                assert_eq!(reply.pcb.s_subtype, Some(SBlockSubtype::Deselect));
+            }
+            other => panic!("expected Reply(S(DESELECT)), got {:?}", other),
+        }
+        // Reset: block number back to 0, chain cleared
+        assert_eq!(handler.block_number(), 0);
+    }
+
+    #[test]
+    fn reset_clears_state() {
+        let mut handler = ProtocolHandler::new(Some(Cid::new(5).unwrap()));
+        handler.toggle_block_number();
+
+        // Accumulate some chain data
+        let _ = handler.process_received(iblock(1, &[0x01], true));
+
         handler.reset();
-        assert_eq!(handler.state(), &ProtocolState::Idle);
-        assert_eq!(handler.current_block_number, 0);
+        assert_eq!(handler.block_number(), 0);
+
+        // Chain is cleared — next single I-Block should return only its payload
+        match handler.process_received(iblock(0, &[0xAA], false)).unwrap() {
+            Action::Complete(data) => assert_eq!(data.as_slice(), &[0xAA]),
+            other => panic!("expected Complete, got {:?}", other),
+        }
     }
 }

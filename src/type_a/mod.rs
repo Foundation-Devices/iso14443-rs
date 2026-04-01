@@ -1,12 +1,14 @@
 use bounded_integer::BoundedU8;
 use core::fmt;
 
+pub mod activation;
 mod anticol_select;
 mod atqa;
 mod ats;
 mod block;
-mod crc;
+pub(crate) mod crc;
 mod pcb;
+pub mod pcd;
 mod pps;
 mod protocol;
 mod rats;
@@ -15,13 +17,41 @@ pub mod vec;
 
 use anticol_select::{Cascade, UidCl};
 pub use anticol_select::{NumberOfValidBits, SEL_CL1, SEL_CL2, SEL_CL3};
-use atqa::AtqA;
-use ats::Ats;
+pub use atqa::AtqA;
+pub use ats::Ats;
 use crc::{append_crc_a, crc_a};
 use pps::{PpsParam, PpsResp};
-use rats::RatsParam;
+pub use rats::RatsParam;
 pub use sak::Sak;
 use vec::{FrameVec, VecExt};
+
+/// Trait for ISO14443 Type A PCD (reader) transceiver hardware.
+///
+/// Implementors handle the physical layer and translate
+/// the ISO14443 frame types into hardware-specific commands.
+/// A future `PiccTransceiver` trait can model the card emulation side.
+pub trait PcdTransceiver {
+    type Error;
+
+    /// Send data using the specified frame format, return protocol response
+    /// bytes. Hardware-specific metadata must be stripped by the
+    /// implementation.
+    fn transceive(&mut self, frame: &Frame) -> Result<FrameVec, Self::Error>;
+
+    /// Probe for hardware-accelerated CRC_A support and enable it.
+    ///
+    /// This is a one-time capability check, typically called early during
+    /// activation. The result determines the CRC strategy for the entire
+    /// session:
+    ///
+    /// - `Ok(())`: the chip handles CRC_A in hardware. From this point on,
+    ///   callers send frame data **without** CRC_A — the transceiver appends
+    ///   it on TX and validates/strips it on RX.
+    /// - `Err(_)`: the chip does not support hardware CRC. Callers must
+    ///   compute and append CRC_A in software (via [`crc::append_crc_a`]) and
+    ///   validate it on received frames.
+    fn enable_hw_crc(&mut self) -> Result<(), Self::Error>;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeAError {
@@ -36,10 +66,24 @@ pub enum TypeAError {
 }
 
 /// 6.1.5 Frame formats
+///
+/// Each variant carries the data to be transmitted.
 pub enum Frame {
-    Short,
-    Standard,
-    BitOriented,
+    /// Short frame: 7 significant bits, no CRC (REQA, WUPA).
+    Short(FrameVec),
+    /// Standard frame: full bytes with CRC (SELECT, RATS, HLTA, blocks).
+    Standard(FrameVec),
+    /// Bit-oriented frame: full bytes, no CRC (anticollision).
+    BitOriented(FrameVec),
+}
+
+impl Frame {
+    /// Borrow the frame data.
+    pub fn data(&self) -> &[u8] {
+        match self {
+            Frame::Short(d) | Frame::Standard(d) | Frame::BitOriented(d) => d,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -67,17 +111,14 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn frame(&self) -> Frame {
+    /// Build a [`Frame`] with the command data and correct frame format.
+    ///
+    /// Standard frames include CRC_A computed in software.
+    pub fn to_frame(&self) -> Result<Frame, TypeAError> {
         match self {
-            Command::ReqA | Command::WupA => Frame::Short,
-            Command::HltA
-            | Command::Select(_)
-            | Command::Rats(_)
-            | Command::Pps(_)
-            | Command::IBlock(_)
-            | Command::RBlock(_)
-            | Command::SBlock(_) => Frame::Standard,
-            Command::AntiCollision(_) => Frame::BitOriented,
+            Command::ReqA | Command::WupA => Ok(Frame::Short(self.to_vec()?)),
+            Command::AntiCollision(_) => Ok(Frame::BitOriented(self.to_vec()?)),
+            _ => Ok(Frame::Standard(self.to_vec()?)),
         }
     }
 
@@ -187,9 +228,13 @@ impl TryFrom<&[u8]> for Command {
 }
 
 // Re-export block-related types
+pub use ats::Fsci;
 pub use block::Block;
 pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
-pub use protocol::{BlockChain, ProtocolHandler, ProtocolState};
+pub use pcd::{Pcd, PcdError};
+pub use pps::Dxi;
+pub use protocol::{Action, ProtocolHandler};
+pub use rats::Fsdi;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Cid(pub BoundedU8<0, 14>);

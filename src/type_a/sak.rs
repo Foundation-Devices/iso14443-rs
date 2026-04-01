@@ -7,6 +7,17 @@ pub struct Sak {
     pub iso14443_4_compliant: bool,
 }
 
+impl Sak {
+    /// Parse SAK from a raw byte (no CRC). Use when hardware CRC is enabled
+    /// and the transceiver has already validated and stripped the CRC.
+    pub fn from_raw(sak: u8) -> Self {
+        Self {
+            uid_complete: sak & 0x04 != 0x04,
+            iso14443_4_compliant: sak & 0x20 == 0x20,
+        }
+    }
+}
+
 impl TryFrom<&[u8]> for Sak {
     type Error = TypeAError;
 

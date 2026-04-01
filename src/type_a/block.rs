@@ -76,31 +76,34 @@ impl Block {
         self.pcb.block_type
     }
 
-    pub fn to_vec(&self) -> Result<FrameVec, super::TypeAError> {
+    /// Serialize the block prologue (PCB + optional CID/NAD) and payload,
+    /// without CRC bytes. Use this when the transceiver handles CRC in
+    /// hardware, or to compute software CRC over the correct data.
+    pub fn to_bytes_without_crc(&self) -> Result<FrameVec, super::TypeAError> {
         let mut bytes = FrameVec::new();
 
-        // Update PCB flags based on optional fields
         let mut pcb = self.pcb.clone();
         pcb = pcb.with_cid_following(self.cid.is_some());
         pcb = pcb.with_nad_following(self.nad.is_some());
 
-        // Add PCB
         bytes.try_push(u8::from(pcb))?;
 
-        // Add CID if present
         if let Some(cid) = &self.cid {
             bytes.try_push(cid.value())?;
         }
 
-        // Add NAD if present
         if let Some(nad) = self.nad {
             bytes.try_push(nad)?;
         }
 
-        // Add payload
         bytes.try_extend(self.payload.as_slice())?;
 
-        // Add CRC
+        Ok(bytes)
+    }
+
+    pub fn to_vec(&self) -> Result<FrameVec, super::TypeAError> {
+        let mut bytes = self.to_bytes_without_crc()?;
+
         bytes.try_push(self.crc.0)?;
         bytes.try_push(self.crc.1)?;
 
