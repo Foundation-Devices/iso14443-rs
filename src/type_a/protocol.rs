@@ -13,6 +13,7 @@ use super::{Block, BlockType, Cid, RBlockSubtype, SBlockSubtype, TypeAError};
 
 /// Action the caller must take after processing a received block.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // ChainVec is large in no_std (heapless); boxing requires alloc
 pub enum Action {
     /// The received I-Block completes the exchange (single block or final
     /// block of a chain). The assembled payload is returned.
