@@ -142,7 +142,7 @@ impl NumberOfValidBits {
         }
     }
 
-    /// NVB for SELECT: 7 bytes valid (SEL + NVB + UID[4] + BCC).
+    /// NVB for SELECT: 7 bytes valid (SEL + NVB + UID\[4\] + BCC).
     /// ISO14443-3 Table 7.
     pub fn select() -> Self {
         Self {

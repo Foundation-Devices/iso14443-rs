@@ -48,7 +48,7 @@ pub trait PcdTransceiver {
     ///   callers send frame data **without** CRC_A — the transceiver appends
     ///   it on TX and validates/strips it on RX.
     /// - `Err(_)`: the chip does not support hardware CRC. Callers must
-    ///   compute and append CRC_A in software (via [`crc::append_crc_a`]) and
+    ///   compute and append CRC_A in software (via `crc::append_crc_a`) and
     ///   validate it on received frames.
     fn try_enable_hw_crc(&mut self) -> Result<(), Self::Error>;
 }

@@ -115,7 +115,7 @@ impl PiccConfig {
 
     /// Set the number of anticollision time slots advertised in ATQA.
     ///
-    /// Defaults to [`BitFrameAntiCollision::Slot1`].
+    /// Defaults to `BitFrameAntiCollision::Slot1`.
     pub fn set_bit_frame_anticollision(&mut self, slot: super::atqa::BitFrameAntiCollision) {
         self.bit_frame_ac = slot;
     }
@@ -176,7 +176,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
     /// Handles REQA → ATQA → anticollision cascade → SELECT → SAK.
     /// Returns when the UID is fully selected (state is `Active`).
     ///
-    /// For ISO14443-4 tags, call [`wait_for_rats`] next.
+    /// For ISO14443-4 tags, call [`Picc::wait_for_rats`] next.
     pub fn wait_for_activation(&mut self) -> Result<(), PiccError<T::Error>> {
         self.state = PiccState::Idle;
         loop {
@@ -209,9 +209,9 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
 
     /// Wait for RATS from the PCD and respond with ATS.
     ///
-    /// Call after [`wait_for_activation`] for ISO14443-4 compliant tags.
-    /// Transitions to `Protocol` state, ready for
-    /// [`receive_command`]/[`send_response`].
+    /// Call after [`Picc::wait_for_activation`] for ISO14443-4 compliant
+    /// tags. Transitions to `Protocol` state, ready for
+    /// [`Picc::receive_command`]/[`Picc::send_response`].
     pub fn wait_for_rats(&mut self) -> Result<(), PiccError<T::Error>> {
         let raw = self
             .transceiver
