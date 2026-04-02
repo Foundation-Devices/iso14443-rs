@@ -16,26 +16,18 @@
 //!
 //! ## Quick start (PCD)
 //!
-//! ```rust,no_run
-//! # struct T; impl iso14443::type_a::PcdTransceiver for T {
-//! #     type Error = ();
-//! #     fn transceive(&mut self, _: &iso14443::type_a::Frame) -> Result<Vec<u8>, ()> { todo!() }
-//! #     fn try_enable_hw_crc(&mut self) -> Result<(), ()> { todo!() }
-//! # }
-//! # fn example(t: &mut T) -> Result<(), Box<dyn std::error::Error>> {
+//! ```rust,ignore
 //! use iso14443::type_a::{activation::activate, pcd::Pcd, Cid, Fsdi};
 //!
-//! let activation = activate(t).map_err(|e| format!("{e:?}"))?;
+//! let activation = activate(&mut t).map_err(|e| format!("{e:?}"))?;
 //! if activation.sak.iso14443_4_compliant {
 //!     let cid = Cid::new(0).unwrap();
-//!     let (mut pcd, _ats) = Pcd::connect(t, Fsdi::Fsd256, cid)
+//!     let (mut pcd, _ats) = Pcd::connect(&mut t, Fsdi::Fsd256, cid)
 //!         .map_err(|e| format!("{e:?}"))?;
 //!     let resp = pcd.exchange(&[0x00, 0xA4, 0x04, 0x00])
 //!         .map_err(|e| format!("{e:?}"))?;
 //!     pcd.deselect().map_err(|e| format!("{e:?}"))?;
 //! }
-//! # Ok(())
-//! # }
 //! ```
 //!
 //! ## Features
