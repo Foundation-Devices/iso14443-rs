@@ -52,7 +52,7 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
     /// Full setup: probe hardware CRC, send RATS, parse ATS, return a
     /// ready session and the parsed ATS for inspection.
     pub fn connect(t: &'t mut T, fsdi: Fsdi, cid: Cid) -> Result<(Self, Ats), PcdError<T::Error>> {
-        let hw_crc = t.enable_hw_crc().is_ok();
+        let hw_crc = t.try_enable_hw_crc().is_ok();
 
         // Build and send RATS
         let rats = RatsParam::new(fsdi, cid);
@@ -360,7 +360,7 @@ mod tests {
             }
         }
 
-        fn enable_hw_crc(&mut self) -> Result<(), MockError> {
+        fn try_enable_hw_crc(&mut self) -> Result<(), MockError> {
             if self.hw_crc { Ok(()) } else { Err(MockError) }
         }
     }

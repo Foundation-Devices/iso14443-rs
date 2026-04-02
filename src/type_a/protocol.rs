@@ -145,12 +145,14 @@ impl ProtocolHandler {
 
     fn process_iblock(&mut self, block: Block) -> Result<Action, TypeAError> {
         self.chain.try_extend(block.payload.as_slice())?;
-        self.toggle_block_number();
 
         if block.is_chaining() {
+            // R(ACK) carries the received block's number (before toggle)
             let rack = self.build_rack()?;
+            self.toggle_block_number();
             Ok(Action::Reply(rack))
         } else {
+            self.toggle_block_number();
             let mut data = ChainVec::new();
             core::mem::swap(&mut data, &mut self.chain);
             Ok(Action::Complete(data))

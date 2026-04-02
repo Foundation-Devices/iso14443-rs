@@ -30,3 +30,8 @@ hex = "0.4"
 [[example]]
 name = "cli_parser"
 path = "example/cli_parser.rs"
+
+[[example]]
+name = "loopback"
+path = "example/loopback.rs"
+required-features = ["std"]

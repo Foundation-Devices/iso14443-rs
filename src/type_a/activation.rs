@@ -42,12 +42,26 @@ pub struct Activation {
 /// Sends REQA, then resolves the full UID through up to 3 cascade levels
 /// (supporting 4, 7, and 10-byte UIDs per ISO14443-3).
 pub fn activate<T: PcdTransceiver>(t: &mut T) -> Result<Activation, ActivationError<T::Error>> {
-    let hw_crc = t.enable_hw_crc().is_ok();
+    do_activate(t, Command::ReqA)
+}
 
-    // REQA
-    let reqa = Command::ReqA.to_frame()?;
+/// Re-activate a halted tag using WUPA.
+///
+/// Same as [`activate`] but sends WUPA (0x52) instead of REQA (0x26),
+/// which wakes tags in the HALT state. Use after DESELECT or HLTA.
+pub fn wakeup<T: PcdTransceiver>(t: &mut T) -> Result<Activation, ActivationError<T::Error>> {
+    do_activate(t, Command::WupA)
+}
+
+fn do_activate<T: PcdTransceiver>(
+    t: &mut T,
+    req: Command,
+) -> Result<Activation, ActivationError<T::Error>> {
+    let hw_crc = t.try_enable_hw_crc().is_ok();
+
+    let frame = req.to_frame()?;
     let resp = t
-        .transceive(&reqa)
+        .transceive(&frame)
         .map_err(ActivationError::PcdTransceiver)?;
     let atqa = AtqA::try_from(resp.as_slice())?;
 

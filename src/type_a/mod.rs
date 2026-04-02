@@ -9,6 +9,7 @@ mod block;
 pub(crate) mod crc;
 mod pcb;
 pub mod pcd;
+pub mod picc;
 mod pps;
 mod protocol;
 mod rats;
@@ -17,7 +18,7 @@ pub mod vec;
 
 use anticol_select::{Cascade, UidCl};
 pub use anticol_select::{NumberOfValidBits, SEL_CL1, SEL_CL2, SEL_CL3};
-pub use atqa::AtqA;
+pub use atqa::{AtqA, BitFrameAntiCollision, UidSize};
 pub use ats::Ats;
 use crc::{append_crc_a, crc_a};
 use pps::{PpsParam, PpsResp};
@@ -29,7 +30,6 @@ use vec::{FrameVec, VecExt};
 ///
 /// Implementors handle the physical layer and translate
 /// the ISO14443 frame types into hardware-specific commands.
-/// A future `PiccTransceiver` trait can model the card emulation side.
 pub trait PcdTransceiver {
     type Error;
 
@@ -50,7 +50,27 @@ pub trait PcdTransceiver {
     /// - `Err(_)`: the chip does not support hardware CRC. Callers must
     ///   compute and append CRC_A in software (via [`crc::append_crc_a`]) and
     ///   validate it on received frames.
-    fn enable_hw_crc(&mut self) -> Result<(), Self::Error>;
+    fn try_enable_hw_crc(&mut self) -> Result<(), Self::Error>;
+}
+
+/// Trait for ISO14443 Type A PICC (card emulation) transceiver hardware.
+///
+/// Unlike [`PcdTransceiver`] which has an atomic `transceive()`, the PICC
+/// splits receive and send because it needs to process the incoming command
+/// and compute its response between the two calls.
+pub trait PiccTransceiver {
+    type Error;
+
+    /// Wait for and return the next frame from the PCD.
+    fn receive(&mut self) -> Result<FrameVec, Self::Error>;
+
+    /// Send a response frame back to the PCD.
+    fn send(&mut self, frame: &Frame) -> Result<(), Self::Error>;
+
+    /// Probe for hardware-accelerated CRC_A support and enable it.
+    ///
+    /// Same semantics as [`PcdTransceiver::try_enable_hw_crc`].
+    fn try_enable_hw_crc(&mut self) -> Result<(), Self::Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,10 +248,11 @@ impl TryFrom<&[u8]> for Command {
 }
 
 // Re-export block-related types
-pub use ats::Fsci;
+pub use ats::{Fsci, Fwi, Sfgi, Ta, Tb, Tc};
 pub use block::Block;
 pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
 pub use pcd::{Pcd, PcdError};
+pub use picc::{Picc, PiccConfig, PiccError, Uid};
 pub use pps::Dxi;
 pub use protocol::{Action, ProtocolHandler};
 pub use rats::Fsdi;

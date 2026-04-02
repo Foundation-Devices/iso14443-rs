@@ -13,7 +13,7 @@ use std::time::Duration;
 
 /// ISO/IEC 14443-4
 /// 5.2 Answer to select
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Ats {
     pub length: u8,
     pub format: Format,
@@ -21,6 +21,64 @@ pub struct Ats {
     pub tb: Tb,
     pub tc: Tc,
     pub historical_bytes: FrameVec,
+}
+
+impl Ats {
+    /// Serialize ATS to its wire representation (TL + T0 + optional
+    /// TA/TB/TC + historical bytes), without CRC.
+    pub fn to_bytes(&self) -> Result<FrameVec, TypeAError> {
+        let mut data = FrameVec::new();
+
+        // T0: FSCI + presence bits
+        let mut t0 = self.format.fsci as u8;
+        if self.format.ta_transmitted {
+            t0 |= 0b0001_0000;
+        }
+        if self.format.tb_transmitted {
+            t0 |= 0b0010_0000;
+        }
+        if self.format.tc_transmitted {
+            t0 |= 0b0100_0000;
+        }
+
+        // TL placeholder (will be updated at the end)
+        data.try_push(0)?;
+        data.try_push(t0)?;
+
+        if self.format.ta_transmitted {
+            data.try_push(self.ta.bits())?;
+        }
+        if self.format.tb_transmitted {
+            data.try_push((self.tb.fwi.0 << 4) | self.tb.sfgi.0)?;
+        }
+        if self.format.tc_transmitted {
+            data.try_push(self.tc.bits())?;
+        }
+
+        data.try_extend(self.historical_bytes.as_slice())?;
+
+        // TL = total length including TL byte itself
+        data[0] = data.len() as u8;
+
+        Ok(data)
+    }
+
+    /// Create an ATS with all interface bytes present.
+    pub fn new(fsci: Fsci, ta: Ta, tb: Tb, tc: Tc) -> Self {
+        Self {
+            length: 0, // computed by to_bytes()
+            format: Format {
+                fsci,
+                ta_transmitted: true,
+                tb_transmitted: true,
+                tc_transmitted: true,
+            },
+            ta,
+            tb,
+            tc,
+            historical_bytes: FrameVec::new(),
+        }
+    }
 }
 
 impl TryFrom<&[u8]> for Ats {
@@ -98,7 +156,7 @@ impl TryFrom<&[u8]> for Ats {
 
 /// ISO/IEC 14443-4
 /// Figure 5 - Coding of format byte
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Format {
     pub fsci: Fsci,
     ta_transmitted: bool,
@@ -178,7 +236,7 @@ bitflags! {
 /// ISO/IEC 14443-4
 /// 5.2.5 Interface byte TB(1)
 /// Figure 7 - Coding of interface byte TB(1)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Tb {
     pub sfgi: Sfgi,
     pub fwi: Fwi,
@@ -195,8 +253,8 @@ impl TryFrom<u8> for Tb {
     }
 }
 
-#[derive(Default)]
-pub struct Sfgi(u8);
+#[derive(Default, Clone)]
+pub struct Sfgi(pub(crate) u8);
 
 /// SFGI is coded in the range from 0 to 14.
 impl TryFrom<u8> for Sfgi {
@@ -238,7 +296,8 @@ impl fmt::Debug for Sfgi {
     }
 }
 
-pub struct Fwi(u8);
+#[derive(Clone)]
+pub struct Fwi(pub(crate) u8);
 
 impl TryFrom<u8> for Fwi {
     type Error = TypeAError;
@@ -286,7 +345,7 @@ bitflags! {
     /// ISO/IEC 14443-4
     /// 5.2.6 Interface byte TC(1)
     /// Figure 8 - Coding of interface byte TC(1)
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub struct Tc: u8 {
         const NAD_SUPP = 0b0000_0001;
         const CID_SUPP = 0b0000_0010;

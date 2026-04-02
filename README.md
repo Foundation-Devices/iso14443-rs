@@ -47,7 +47,7 @@ impl PcdTransceiver for MyTransceiver {
         todo!("implement for your hardware")
     }
 
-    fn enable_hw_crc(&mut self) -> Result<(), MyError> {
+    fn try_enable_hw_crc(&mut self) -> Result<(), MyError> {
         // Enable hardware CRC if the chip supports it.
         // Return Err to fall back to software CRC.
         Err(MyError)

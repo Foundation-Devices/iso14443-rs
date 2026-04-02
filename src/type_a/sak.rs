@@ -16,6 +16,18 @@ impl Sak {
             iso14443_4_compliant: sak & 0x20 == 0x20,
         }
     }
+
+    /// Serialize SAK to its single-byte wire representation (without CRC).
+    pub fn to_byte(&self) -> u8 {
+        let mut sak = 0u8;
+        if !self.uid_complete {
+            sak |= 0x04;
+        }
+        if self.iso14443_4_compliant {
+            sak |= 0x20;
+        }
+        sak
+    }
 }
 
 impl TryFrom<&[u8]> for Sak {
