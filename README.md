@@ -15,10 +15,13 @@ Rust library to manipulate ISO/IEC 14443 data.
     - [x] iso14443-3: REQA/WUPA/ATQA/ANTICOLLISION/SELECT/SAK/HLTA
     - [x] iso14443-3: CRC_A checks (hardware-accelerated or software)
     - [x] iso14443-3: PCD activation with anticollision cascade (4/7/10-byte UIDs)
-    - [x] iso14443-4: RATS/ATS/PPS
+    - [x] iso14443-3: PICC activation responder (ATQA, anticollision, SAK)
+    - [x] iso14443-3: WUPA re-activation of halted tags
+    - [x] iso14443-4: RATS/ATS/PPS (both PCD and PICC sides)
     - [x] iso14443-4: PCB (Protocol Control Byte)
     - [x] iso14443-4: Block format (I-block, R-block, S-block)
     - [x] iso14443-4: PCD transport layer (APDU exchange, chaining, WTX, error recovery, DESELECT)
+    - [x] iso14443-4: PICC transport layer (card emulation, chaining, PPS, DESELECT → HALT)
     - [x] iso14443-4: Generic block protocol handler (reusable for PCD and PICC)
 - [ ] Type-B
 
@@ -83,6 +86,16 @@ fn talk_to_card(t: &mut MyTransceiver) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 ```
+
+## Loopback Example
+
+A full PCD↔PICC loopback demonstrates the entire protocol over in-memory channels:
+
+```bash
+$ cargo run --example loopback --features std
+```
+
+Exercises: triple-cascade UID (10 bytes), RATS/ATS, PPS negotiation, short and long APDU exchange with I-Block chaining, DESELECT → HALT, and WUPA re-activation for a second session.
 
 ## CLI Parser
 
