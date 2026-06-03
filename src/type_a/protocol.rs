@@ -39,6 +39,7 @@ pub enum Action {
 pub struct ProtocolHandler {
     cid: Option<Cid>,
     block_number: u8,
+    in_chaining: bool,
     chain: ChainVec,
 }
 
@@ -47,6 +48,7 @@ impl ProtocolHandler {
         Self {
             cid,
             block_number: 0,
+            in_chaining: false,
             chain: ChainVec::new(),
         }
     }
@@ -61,11 +63,13 @@ impl ProtocolHandler {
 
     pub fn reset(&mut self) {
         self.block_number = 0;
+        self.in_chaining = false;
         self.chain.clear();
     }
 
     /// Reset chain accumulator between exchanges.
     pub fn reset_chain(&mut self) {
+        self.in_chaining = false;
         self.chain.clear();
     }
 
@@ -147,11 +151,17 @@ impl ProtocolHandler {
         self.chain.try_extend(block.payload.as_slice())?;
 
         if block.is_chaining() {
+            if !self.in_chaining {
+                self.block_number = block.block_number();
+                self.toggle_block_number();
+                self.in_chaining = true;
+            }
             // R(ACK) carries the received block's number (before toggle)
             let rack = self.build_rack()?;
             self.toggle_block_number();
             Ok(Action::Reply(rack))
         } else {
+            self.in_chaining = false;
             self.toggle_block_number();
             let mut data = ChainVec::new();
             core::mem::swap(&mut data, &mut self.chain);
