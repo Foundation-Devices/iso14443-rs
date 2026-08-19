@@ -7,6 +7,10 @@
 # cannot, so what runs here is what was reviewed. Dependabot proposes SHA
 # updates as reviewable pull requests (see ../dependabot.yml), and the
 # `pinning` job below fails if an unpinned reference sneaks back in.
+#
+# The Rust toolchain is not pinned here either: the `toolchain` job reads
+# it from rust-toolchain.toml, the same file devenv and rustup use, so a
+# developer and CI always run the same compiler and the same lints.
 
 name: CI
 
@@ -25,8 +29,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Reads the pinned toolchain out of rust-toolchain.toml so CI installs
+  # exactly what a developer gets from devenv or rustup. Bump the file, not
+  # this workflow.
+  toolchain:
+    name: Toolchain
+    runs-on: ubuntu-latest
+    outputs:
+      channel: ${{ steps.read.outputs.channel }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: read
+        run: |
+          channel=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"(.+)"[[:space:]]*$/\1/p' rust-toolchain.toml)
+          if [ -z "$channel" ]; then
+            echo "::error::no [toolchain] channel in rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "pinned toolchain: $channel"
+
   fmt:
     name: Format
+    needs: toolchain
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -34,12 +61,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ needs.toolchain.outputs.channel }}
           components: rustfmt
       - run: cargo fmt --check
 
   clippy:
     name: Clippy (${{ matrix.features }})
+    needs: toolchain
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -50,12 +78,13 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ needs.toolchain.outputs.channel }}
           components: clippy
       - run: cargo clippy --features "${{ matrix.features }}" -- -D warnings
 
   build:
     name: Build (${{ matrix.features }})
+    needs: toolchain
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -66,11 +95,12 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ needs.toolchain.outputs.channel }}
       - run: cargo build --features "${{ matrix.features }}"
 
   test:
     name: Test (${{ matrix.features }})
+    needs: toolchain
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -81,7 +111,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ needs.toolchain.outputs.channel }}
       - run: cargo test --features "${{ matrix.features }}"
 
   pinning:

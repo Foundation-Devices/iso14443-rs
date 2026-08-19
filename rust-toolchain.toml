@@ -1,5 +1,15 @@
 # SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# The single source of truth for the toolchain: rustup reads it, devenv
+# reads it (languages.rust.toolchainFile), and CI reads the channel out of
+# it to install the same version. Pinned rather than "stable" so a new
+# release cannot fail CI on lints the local toolchain does not have yet.
+# Bumping it here bumps it everywhere.
+#
+# This is the development toolchain, not the minimum supported one — that
+# is `rust-version` in Cargo.toml.
+
 [toolchain]
-channel = "stable"
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
