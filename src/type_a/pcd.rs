@@ -507,4 +507,43 @@ mod tests {
         let sent = &t.sent[0];
         assert_eq!(sent.len(), 2); // PCB + payload, no CRC
     }
+
+    #[test]
+    fn connect_rejects_malformed_ats_sw_crc() {
+        // TL = 5 but only two ATS bytes follow: a protocol error, not a panic.
+        let ats = append_crc_a(&[0x05, 0x78]).unwrap();
+        let mut t = MockTransceiver::new(false, vec![ats]);
+
+        match Pcd::connect(&mut t, Fsdi::Fsd256, Cid::new(0).unwrap()) {
+            Err(PcdError::Protocol(TypeAError::InvalidLength)) => {}
+            other => panic!(
+                "expected Protocol(InvalidLength), got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    #[test]
+    fn connect_rejects_malformed_ats_hw_crc() {
+        // Hardware CRC path: the transceiver hands over CRC-stripped bytes.
+        let mut t = MockTransceiver::new(true, vec![frame_vec(&[0x05, 0x78])]);
+
+        match Pcd::connect(&mut t, Fsdi::Fsd256, Cid::new(0).unwrap()) {
+            Err(PcdError::Protocol(TypeAError::InvalidLength)) => {}
+            other => panic!(
+                "expected Protocol(InvalidLength), got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    #[test]
+    fn connect_handles_one_byte_ats() {
+        // The audit's crash input: an ATS declaring TL = 1. It is a legal
+        // (if degenerate) ATS and must parse to the default format.
+        let mut t = MockTransceiver::new(true, vec![frame_vec(&[0x01])]);
+        let (_pcd, ats) = Pcd::connect(&mut t, Fsdi::Fsd256, Cid::new(0).unwrap()).unwrap();
+        assert_eq!(ats.length, 1);
+        assert_eq!(ats.format.fsci.fsc(), 32);
+    }
 }

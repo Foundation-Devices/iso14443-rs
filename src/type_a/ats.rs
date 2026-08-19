@@ -79,78 +79,89 @@ impl Ats {
             historical_bytes: FrameVec::new(),
         }
     }
+
+    /// Parse the ATS body — TL, the optional T0/TA(1)/TB(1)/TC(1) interface
+    /// bytes and the historical bytes — without the CRC_A epilogue.
+    ///
+    /// TL counts itself and every following ATS byte but not the CRC
+    /// (§5.2.2), so it must match `body.len()` exactly. Every field is read
+    /// through a checked cursor, so no input can panic:
+    ///
+    /// - `TL = 0`: invalid, TL always counts at least itself →
+    ///   [`TypeAError::InvalidLength`].
+    /// - `TL = 1`: shortest legal ATS. T0 is only present when TL is greater
+    ///   than 1 (§5.2.3), so the default format applies and there are no
+    ///   interface or historical bytes.
+    /// - Any advertised interface byte the body is too short to hold →
+    ///   [`TypeAError::InvalidLength`].
+    fn parse_body(body: &[u8]) -> Result<Self, TypeAError> {
+        let length = *body.first().ok_or(TypeAError::InvalidLength)?;
+        if usize::from(length) != body.len() {
+            return Err(TypeAError::InvalidLength);
+        }
+
+        let mut offset = 1;
+        let format = if length > 1 {
+            Format::try_from(take_byte(body, &mut offset)?)?
+        } else {
+            Format::default()
+        };
+
+        let ta = if format.ta_transmitted {
+            Ta::from_bits_truncate(take_byte(body, &mut offset)?)
+        } else {
+            Ta::default()
+        };
+        let tb = if format.tb_transmitted {
+            Tb::try_from(take_byte(body, &mut offset)?)?
+        } else {
+            Tb::default()
+        };
+        let tc = if format.tc_transmitted {
+            Tc::from_bits_truncate(take_byte(body, &mut offset)?)
+        } else {
+            Tc::default()
+        };
+
+        let mut historical_bytes = FrameVec::new();
+        historical_bytes.try_extend(body.get(offset..).ok_or(TypeAError::InvalidLength)?)?;
+
+        Ok(Self {
+            length,
+            format,
+            ta,
+            tb,
+            tc,
+            historical_bytes,
+        })
+    }
+}
+
+/// Read the byte at `offset` and advance it, without ever indexing out of
+/// bounds: a truncated ATS yields [`TypeAError::InvalidLength`].
+fn take_byte(body: &[u8], offset: &mut usize) -> Result<u8, TypeAError> {
+    let byte = *body.get(*offset).ok_or(TypeAError::InvalidLength)?;
+    *offset += 1;
+    Ok(byte)
 }
 
 impl TryFrom<&[u8]> for Ats {
     type Error = TypeAError;
 
+    /// Parse an ATS frame: the ATS body followed by its two CRC_A bytes.
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.is_empty() {
-            return Err(TypeAError::InvalidLength);
+        let body_len = value
+            .len()
+            .checked_sub(2)
+            .ok_or(TypeAError::InvalidLength)?;
+        let (body, crc) = value.split_at(body_len);
+
+        let good = crc_a(body);
+        if good != (crc[0], crc[1]) && (0, 0) != (crc[0], crc[1]) {
+            return Err(TypeAError::InvalidCrc(good));
         }
-        let length = value[0];
-        if value.len() != length as usize + 2 {
-            return Err(TypeAError::InvalidLength);
-        }
-        let format = if length > 1 {
-            Format::try_from(value[1])?
-        } else {
-            Format::default()
-        };
-        let mut offset = 2;
-        let ta = if format.ta_transmitted {
-            if value.len() >= offset + 2 {
-                offset += 1;
-                Ok(Ta::from_bits_truncate(value[offset - 1]))
-            } else {
-                Err(TypeAError::InvalidLength)
-            }
-        } else {
-            Ok(Ta::default())
-        }?;
-        let tb = if format.tb_transmitted {
-            if value.len() >= offset + 2 {
-                offset += 1;
-                Ok(Tb::try_from(value[offset - 1])?)
-            } else {
-                Err(TypeAError::InvalidLength)
-            }
-        } else {
-            Ok(Tb::default())
-        }?;
-        let tc = if format.tc_transmitted {
-            if value.len() >= offset + 2 {
-                offset += 1;
-                Ok(Tc::from_bits_truncate(value[offset - 1]))
-            } else {
-                Err(TypeAError::InvalidLength)
-            }
-        } else {
-            Ok(Tc::default())
-        }?;
-        let historical_bytes_len = value.len() - offset - 2;
-        let mut historical_bytes = FrameVec::new();
-        historical_bytes.try_extend(&value[offset..offset + historical_bytes_len])?;
-        offset += historical_bytes_len;
-        if value.len() == offset + 2 {
-            let crc1 = value[offset];
-            let crc2 = value[offset + 1];
-            let good = crc_a(&value[..offset]);
-            if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
-                Ok(Self {
-                    length,
-                    format,
-                    ta,
-                    tb,
-                    tc,
-                    historical_bytes,
-                })
-            } else {
-                Err(TypeAError::InvalidCrc(good))
-            }
-        } else {
-            Err(TypeAError::InvalidLength)
-        }
+
+        Self::parse_body(body)
     }
 }
 
@@ -387,5 +398,151 @@ mod tests {
         let fwi = Fwi::try_from(14u8).unwrap();
         assert_eq!(fwi.fwt(), Duration::from_micros(4947968));
         assert!(Fwi::try_from(15u8).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::super::crc::append_crc_a;
+    use super::*;
+
+    /// Append the real CRC_A to an ATS body.
+    fn with_crc(body: &[u8]) -> FrameVec {
+        append_crc_a(body).unwrap()
+    }
+
+    #[test]
+    fn rejects_frames_shorter_than_the_crc() {
+        assert!(matches!(
+            Ats::try_from([].as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+        assert!(matches!(
+            Ats::try_from([0x00].as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+        assert!(matches!(
+            Ats::try_from([0x01].as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_length_byte() {
+        // TL always counts at least itself, so TL = 0 never matches the body.
+        assert!(Ats::try_from(with_crc(&[0x00]).as_slice()).is_err());
+        assert!(Ats::try_from([0x00, 0x00].as_slice()).is_err());
+        assert!(Ats::try_from([0x00, 0x00, 0x00].as_slice()).is_err());
+    }
+
+    #[test]
+    fn length_one_is_the_shortest_legal_ats() {
+        // TL = 1: no T0, so the default format applies (FSCI = 2 → FSC 32)
+        // and there are neither interface nor historical bytes. This is the
+        // input that used to underflow the historical-byte computation.
+        let ats = Ats::try_from(with_crc(&[0x01]).as_slice()).unwrap();
+        assert_eq!(ats.length, 1);
+        assert_eq!(ats.format.fsci.fsc(), 32);
+        assert!(ats.historical_bytes.is_empty());
+
+        // Same shape with the zero-CRC representation must not panic either.
+        let _ = Ats::try_from([0x01, 0x00, 0x00].as_slice());
+    }
+
+    #[test]
+    fn rejects_length_mismatch() {
+        // TL = 5 but only two body bytes were transmitted.
+        assert!(matches!(
+            Ats::try_from(with_crc(&[0x05, 0x78]).as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+        // TL = 2 but three body bytes were transmitted.
+        assert!(matches!(
+            Ats::try_from(with_crc(&[0x02, 0x78, 0x80]).as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_interface_bytes() {
+        // T0 = 0x78 advertises TA(1), TB(1) and TC(1); the body only holds
+        // TA(1), so TB(1) runs past the end.
+        assert!(matches!(
+            Ats::try_from(with_crc(&[0x03, 0x78, 0x80]).as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+        // T0 = 0x20 advertises TB(1) alone, which is missing entirely.
+        assert!(matches!(
+            Ats::try_from(with_crc(&[0x02, 0x20]).as_slice()),
+            Err(TypeAError::InvalidLength)
+        ));
+    }
+
+    #[test]
+    fn accepts_full_interface_bytes_and_historical_bytes() {
+        // TL = 5, T0 = 0x78 (FSCI 8, TA/TB/TC present), TA/TB/TC, no
+        // historical bytes.
+        let ats = Ats::try_from(with_crc(&[0x05, 0x78, 0x80, 0x40, 0x02]).as_slice()).unwrap();
+        assert_eq!(ats.length, 5);
+        assert_eq!(ats.format.fsci.fsc(), 256);
+        assert!(ats.historical_bytes.is_empty());
+
+        // Same, plus two historical bytes.
+        let ats = Ats::try_from(with_crc(&[0x07, 0x78, 0x80, 0x40, 0x02, 0xAA, 0xBB]).as_slice())
+            .unwrap();
+        assert_eq!(ats.historical_bytes.as_slice(), &[0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn accepts_maximum_historical_bytes() {
+        // TL = 255: TL + T0 + 253 historical bytes, the largest ATS the
+        // length byte can describe. Built as a raw frame because it exceeds
+        // the no_std FrameVec capacity by the two CRC bytes.
+        let mut frame = [0u8; 257];
+        frame[0] = 0xFF;
+        frame[1] = 0x02; // T0: FSCI = 2, no interface bytes
+        for (i, byte) in frame[2..255].iter_mut().enumerate() {
+            *byte = i as u8;
+        }
+        let (crc1, crc2) = crc_a(&frame[..255]);
+        frame[255] = crc1;
+        frame[256] = crc2;
+
+        let ats = Ats::try_from(frame.as_slice()).unwrap();
+        assert_eq!(ats.length, 255);
+        assert_eq!(ats.historical_bytes.len(), 253);
+    }
+
+    #[test]
+    fn arbitrary_input_never_panics() {
+        // Every 0, 1 and 2-byte frame.
+        let _ = Ats::try_from([].as_slice());
+        for a in 0..=u8::MAX {
+            let _ = Ats::try_from([a].as_slice());
+            for b in 0..=u8::MAX {
+                let _ = Ats::try_from([a, b].as_slice());
+            }
+        }
+
+        // Pseudo-random longer frames, with the declared length byte biased
+        // towards plausible values so the interface-byte paths get exercised.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut buf = [0u8; 300];
+        for _ in 0..20_000 {
+            let len = (next() as usize) % buf.len();
+            for byte in buf[..len].iter_mut() {
+                *byte = next() as u8;
+            }
+            if len > 0 && next() % 2 == 0 {
+                buf[0] = len.saturating_sub(2) as u8;
+            }
+            let _ = Ats::try_from(&buf[..len]);
+        }
     }
 }
