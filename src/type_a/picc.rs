@@ -404,11 +404,9 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 self.send_ats()?;
                 self.state = PiccState::Protocol;
             }
-            0x50 => {
-                // HLTA: 50 00 (+ CRC on the wire)
-                if self.strip_crc(raw)? == [0x50, 0x00] {
-                    self.state = PiccState::Halted;
-                }
+            // HLTA: 50 00 (+ CRC on the wire)
+            0x50 if self.strip_crc(raw)? == [0x50, 0x00] => {
+                self.state = PiccState::Halted;
             }
             _ => {} // Ignore unknown in Active state
         }
