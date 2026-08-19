@@ -23,6 +23,26 @@ pub(crate) fn crc_a(data: &[u8]) -> (u8, u8) {
     (((crc & 0x00FF) as u8), ((crc >> 8) as u8))
 }
 
+/// Split a standard frame into its data and its CRC_A epilogue, checking
+/// the CRC.
+///
+/// Every parser of on-the-wire bytes goes through this: the CRC must be the
+/// one calculated over the data, with no sentinel value standing in for it.
+/// Frames whose CRC a trusted transceiver already validated and stripped are
+/// parsed with the dedicated `from_crc_verified` constructors instead.
+pub(crate) fn split_crc_a(frame: &[u8]) -> Result<&[u8], TypeAError> {
+    let data_len = frame
+        .len()
+        .checked_sub(2)
+        .ok_or(TypeAError::InvalidLength)?;
+    let (data, crc) = frame.split_at(data_len);
+    let good = crc_a(data);
+    if good != (crc[0], crc[1]) {
+        return Err(TypeAError::InvalidCrc(good));
+    }
+    Ok(data)
+}
+
 pub(crate) fn append_crc_a(data: &[u8]) -> Result<FrameVec, TypeAError> {
     let (lsb, msb) = crc_a(data);
     let mut res = FrameVec::new();

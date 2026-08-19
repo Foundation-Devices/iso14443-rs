@@ -10,7 +10,7 @@ use super::{
     Ats, Block, Cid, Frame, PiccTransceiver, Sak, TypeAError,
     anticol_select::{SEL_CL1, SEL_CL2, SEL_CL3},
     atqa::AtqA,
-    crc::{append_crc_a, crc_a},
+    crc::{append_crc_a, split_crc_a},
     pcb::SBlockSubtype,
     pps::PpsParam,
     protocol::{Action, ProtocolHandler},
@@ -345,14 +345,12 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
             self.transceiver
                 .send(&Frame::BitOriented(resp))
                 .map_err(PiccError::PiccTransceiver)?;
-        } else if raw.len() == 9 && raw[1] == 0x70 {
-            // SELECT: SEL + NVB(0x70) + UID[4] + BCC + CRC
-            if !self.hw_crc {
-                let good = crc_a(&raw[..7]);
-                if good != (raw[7], raw[8]) && (0, 0) != (raw[7], raw[8]) {
-                    return Err(PiccError::Protocol(TypeAError::InvalidCrc(good)));
-                }
+        } else if raw[1] == 0x70 {
+            // SELECT: SEL + NVB(0x70) + UID[4] + BCC (+ CRC on the wire)
+            if self.strip_crc(raw)?.len() != 7 {
+                return Ok(()); // Malformed SELECT, ignore
             }
+
             // Respond with SAK
             let is_last_level = self.is_last_cascade_level(cascade_level);
             let sak = Sak {
@@ -379,14 +377,11 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
 
         match raw[0] {
             0xe0 => {
-                // RATS
-                let param_byte = if raw.len() >= 2 { raw[1] } else { 0 };
-                if !self.hw_crc && raw.len() == 4 {
-                    let good = crc_a(&raw[..2]);
-                    if good != (raw[2], raw[3]) && (0, 0) != (raw[2], raw[3]) {
-                        return Err(PiccError::Protocol(TypeAError::InvalidCrc(good)));
-                    }
-                }
+                // RATS: E0 + param (+ CRC on the wire)
+                let param_byte = match *self.strip_crc(raw)? {
+                    [0xe0, param] => param,
+                    _ => return Err(PiccError::Protocol(TypeAError::InvalidLength)),
+                };
                 let rats = RatsParam::try_from(param_byte)?;
                 self.fsd = rats.fsdi().fsd();
                 let cid = Cid::new(rats.cid().value());
@@ -397,8 +392,10 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 self.state = PiccState::Protocol;
             }
             0x50 => {
-                // HLTA
-                self.state = PiccState::Halted;
+                // HLTA: 50 00 (+ CRC on the wire)
+                if self.strip_crc(raw)? == [0x50, 0x00] {
+                    self.state = PiccState::Halted;
+                }
             }
             _ => {} // Ignore unknown in Active state
         }
@@ -407,16 +404,8 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
 
     /// Handle PPS request: validate, respond with PPSS byte.
     fn handle_pps(&mut self, raw: &[u8]) -> Result<(), PiccError<T::Error>> {
-        // Parse and validate PPS (includes CRC check for sw_crc)
-        let pps = if self.hw_crc {
-            let mut buf = FrameVec::new();
-            buf.try_extend(raw)?;
-            buf.try_push(0)?;
-            buf.try_push(0)?;
-            PpsParam::try_from(buf.as_slice())?
-        } else {
-            PpsParam::try_from(raw)?
-        };
+        // Parse and validate PPS (the software-CRC path checks the CRC)
+        let pps = PpsParam::from_crc_verified(self.strip_crc(raw)?)?;
 
         // Respond with PPSS byte (0xD0 + CID)
         let ppss = 0xd0 + u8::from(&pps.cid);
@@ -494,14 +483,18 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
     }
 
     fn parse_block(&self, raw: &[u8]) -> Result<Block, PiccError<T::Error>> {
+        Ok(Block::from_crc_verified(self.strip_crc(raw)?)?)
+    }
+
+    /// Return the command data of a received standard frame.
+    ///
+    /// With hardware CRC the transceiver has already validated and stripped
+    /// the CRC_A; otherwise it is still attached and must match the data.
+    fn strip_crc<'r>(&self, raw: &'r [u8]) -> Result<&'r [u8], PiccError<T::Error>> {
         if self.hw_crc {
-            let mut buf = FrameVec::new();
-            buf.try_extend(raw)?;
-            buf.try_push(0)?;
-            buf.try_push(0)?;
-            Ok(Block::try_from(buf.as_slice())?)
+            Ok(raw)
         } else {
-            Ok(Block::try_from(raw)?)
+            Ok(split_crc_a(raw)?)
         }
     }
 
@@ -774,5 +767,76 @@ mod tests {
         let bcc1 = picc.uid_bcc_for_level(1).unwrap();
         assert_eq!(&bcc1[0..4], &[0x04, 0x05, 0x06, 0x07]);
         assert_eq!(bcc1[4], 0x04 ^ 0x05 ^ 0x06 ^ 0x07);
+    }
+
+    /// A frame carrying the all-zero CRC sentinel instead of its CRC_A.
+    fn zero_crc(data: &[u8]) -> FrameVec {
+        let mut v = frame_vec(data);
+        v.try_push(0).unwrap();
+        v.try_push(0).unwrap();
+        v
+    }
+
+    #[test]
+    fn select_with_zero_crc_is_rejected() {
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04];
+        let mut select = vec![0x93, 0x70];
+        select.extend_from_slice(&uid_bcc);
+
+        let receives = vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            zero_crc(&select),
+        ];
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+
+        match picc.wait_for_activation() {
+            Err(PiccError::Protocol(TypeAError::InvalidCrc(_))) => {}
+            other => panic!("expected Protocol(InvalidCrc), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rats_with_zero_crc_is_rejected() {
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04];
+        let receives = vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            select_cmd(0x93, &uid_bcc),
+            zero_crc(&[0xe0, 0x80]),
+        ];
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.wait_for_activation().unwrap();
+
+        match picc.wait_for_rats() {
+            Err(PiccError::Protocol(TypeAError::InvalidCrc(_))) => {}
+            other => panic!("expected Protocol(InvalidCrc), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn iblock_with_zero_crc_is_rejected() {
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04];
+        let receives = vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            select_cmd(0x93, &uid_bcc),
+            rats_cmd(8, 0),
+            zero_crc(&[0x02, 0xAA, 0xBB]),
+        ];
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        match picc.receive_command() {
+            Err(PiccError::Protocol(TypeAError::InvalidCrc(_))) => {}
+            other => panic!("expected Protocol(InvalidCrc), got {:?}", other),
+        }
     }
 }

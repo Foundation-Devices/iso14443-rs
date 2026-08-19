@@ -4,7 +4,7 @@
 use core::fmt;
 
 use super::Cid;
-use super::crc::crc_a;
+use super::crc::{append_crc_a, crc_a, split_crc_a};
 use super::pcb::{BlockType, Pcb};
 use super::vec::{FrameVec, VecExt};
 
@@ -14,7 +14,6 @@ pub struct Block {
     pub cid: Option<Cid>,
     pub nad: Option<u8>,
     pub payload: FrameVec,
-    pub crc: (u8, u8),
 }
 
 impl fmt::Debug for Block {
@@ -40,7 +39,6 @@ impl Block {
             cid: None,
             nad: None,
             payload: FrameVec::new(),
-            crc: (0, 0),
         }
     }
 
@@ -56,11 +54,6 @@ impl Block {
 
     pub fn with_payload(mut self, payload: FrameVec) -> Self {
         self.payload = payload;
-        self
-    }
-
-    pub fn with_crc(mut self, crc: (u8, u8)) -> Self {
-        self.crc = crc;
         self
     }
 
@@ -101,31 +94,24 @@ impl Block {
         Ok(bytes)
     }
 
+    /// Serialize the block as a standard frame: prologue, payload and the
+    /// CRC_A calculated over them.
     pub fn to_vec(&self) -> Result<FrameVec, super::TypeAError> {
-        let mut bytes = self.to_bytes_without_crc()?;
-
-        bytes.try_push(self.crc.0)?;
-        bytes.try_push(self.crc.1)?;
-
-        Ok(bytes)
+        append_crc_a(&self.to_bytes_without_crc()?)
     }
 
+    /// CRC_A over the block's prologue and payload.
     pub fn calculate_crc(&self) -> Result<(u8, u8), super::TypeAError> {
-        let data = self.to_vec()?;
-        Ok(crc_a(&data[..data.len() - 2]))
+        Ok(crc_a(&self.to_bytes_without_crc()?))
     }
 
-    pub fn validate_crc(&self) -> Result<bool, super::TypeAError> {
-        let calculated = self.calculate_crc()?;
-        Ok(calculated == self.crc || self.crc == (0, 0))
-    }
-}
-
-impl TryFrom<&[u8]> for Block {
-    type Error = crate::type_a::TypeAError;
-
-    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
-        if data.len() < 3 {
+    /// Parse a block whose CRC_A a trusted transceiver has already validated
+    /// and stripped: PCB, the optional CID/NAD and the payload, with no
+    /// epilogue.
+    ///
+    /// Use [`Block::try_from`] for bytes that came off the air unverified.
+    pub fn from_crc_verified(data: &[u8]) -> Result<Self, super::TypeAError> {
+        if data.is_empty() {
             return Err(crate::type_a::TypeAError::InvalidLength);
         }
 
@@ -169,33 +155,29 @@ impl TryFrom<&[u8]> for Block {
             }
         }
 
-        // Extract payload and CRC
-        let remaining_len = data.len() - offset;
-        if remaining_len < 2 {
-            return Err(crate::type_a::TypeAError::InvalidLength);
-        }
-
-        let payload_end = data.len() - 2;
+        // Everything after the prologue is payload
         let mut payload = FrameVec::new();
-        payload.try_extend(&data[offset..payload_end])?;
-        let crc = (data[payload_end], data[payload_end + 1]);
+        payload.try_extend(
+            data.get(offset..)
+                .ok_or(crate::type_a::TypeAError::InvalidLength)?,
+        )?;
 
-        let block = Self {
+        Ok(Self {
             pcb,
             cid,
             nad,
             payload,
-            crc,
-        };
+        })
+    }
+}
 
-        // Validate CRC
-        if !block.validate_crc()? {
-            return Err(crate::type_a::TypeAError::InvalidCrc(
-                block.calculate_crc()?,
-            ));
-        }
+impl TryFrom<&[u8]> for Block {
+    type Error = crate::type_a::TypeAError;
 
-        Ok(block)
+    /// Parse a block off the wire: the block bytes followed by their two
+    /// CRC_A bytes, which must match the data.
+    fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_crc_verified(split_crc_a(data)?)
     }
 }
 

@@ -2,7 +2,7 @@ use bounded_integer::BoundedU8;
 use core::fmt;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use super::{Cid, TypeAError, crc_a};
+use super::{Cid, TypeAError, crc::split_crc_a};
 
 impl From<&Cid> for u8 {
     fn from(value: &Cid) -> Self {
@@ -26,17 +26,20 @@ impl From<&PpsParam> for u8 {
     }
 }
 
-impl TryFrom<&[u8]> for PpsParam {
-    type Error = TypeAError;
-
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() < 4 {
+impl PpsParam {
+    /// Parse a PPS request whose CRC_A a trusted transceiver has already
+    /// validated and stripped: PPSS, PPS0 and the optional PPS1, with no
+    /// epilogue.
+    ///
+    /// Use [`PpsParam::try_from`] for bytes that came off the air unverified.
+    pub fn from_crc_verified(value: &[u8]) -> Result<Self, TypeAError> {
+        if value.len() < 2 {
             return Err(TypeAError::InvalidLength);
         }
         let cid = Cid(<BoundedU8<0, 14>>::new(value[0] & 0xf).ok_or(TypeAError::Other)?);
         let pps1_present = value[1] == 0x11;
         let (dsi, dri) = if pps1_present {
-            if value.len() != 5 {
+            if value.len() != 3 {
                 return Err(TypeAError::InvalidLength);
             }
             (
@@ -44,16 +47,22 @@ impl TryFrom<&[u8]> for PpsParam {
                 Dxi::try_from(value[2] & 0b11).map_err(|_| TypeAError::Other)?,
             )
         } else {
+            if value.len() != 2 {
+                return Err(TypeAError::InvalidLength);
+            }
             (Dxi::default(), Dxi::default())
         };
-        let len = value.len();
-        let crc1 = value[len - 2];
-        let crc2 = value[len - 1];
-        let good = crc_a(&value[..len - 2]);
-        if good != (crc1, crc2) && (0, 0) != (crc1, crc2) {
-            return Err(TypeAError::InvalidCrc(good));
-        }
         Ok(Self { cid, dri, dsi })
+    }
+}
+
+impl TryFrom<&[u8]> for PpsParam {
+    type Error = TypeAError;
+
+    /// Parse a PPS request off the wire: the request bytes followed by their
+    /// two CRC_A bytes, which must match the data.
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        Self::from_crc_verified(split_crc_a(value)?)
     }
 }
 
@@ -93,23 +102,29 @@ impl Dxi {
 #[derive(Debug)]
 pub struct PpsResp(pub Cid);
 
+impl PpsResp {
+    /// Parse a PPS response whose CRC_A a trusted transceiver has already
+    /// validated and stripped: the PPSS byte, with no epilogue.
+    ///
+    /// Use [`PpsResp::try_from`] for bytes that came off the air unverified.
+    pub fn from_crc_verified(value: &[u8]) -> Result<Self, TypeAError> {
+        match value {
+            [ppss] => Ok(Self(Cid(
+                <BoundedU8<0, 14>>::new(ppss & 0xf).ok_or(TypeAError::Other)?
+            ))),
+            _ => Err(TypeAError::InvalidLength),
+        }
+    }
+}
+
 /// ISO/IEC 14443-4
 /// Figure 13 - Protocol and parameter selection response
 impl TryFrom<&[u8]> for PpsResp {
     type Error = TypeAError;
 
+    /// Parse a PPS response off the wire: the PPSS byte followed by its two
+    /// CRC_A bytes, which must match the data.
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() != 3 {
-            return Err(TypeAError::InvalidLength);
-        }
-        let crc1 = value[1];
-        let crc2 = value[2];
-        let good = crc_a(&value[..1]);
-        if good != (crc1, crc2) && (0, 0) != (crc1, crc2) {
-            return Err(TypeAError::InvalidCrc(good));
-        }
-        Ok(Self(Cid(
-            <BoundedU8<0, 14>>::new(value[0] & 0xf).ok_or(TypeAError::Other)?
-        )))
+        Self::from_crc_verified(split_crc_a(value)?)
     }
 }

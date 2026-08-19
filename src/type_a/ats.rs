@@ -4,7 +4,7 @@
 use core::fmt;
 
 use super::vec::{FrameVec, VecExt};
-use super::{TypeAError, crc::crc_a};
+use super::{TypeAError, crc::split_crc_a};
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
@@ -80,8 +80,11 @@ impl Ats {
         }
     }
 
-    /// Parse the ATS body — TL, the optional T0/TA(1)/TB(1)/TC(1) interface
-    /// bytes and the historical bytes — without the CRC_A epilogue.
+    /// Parse an ATS whose CRC_A a trusted transceiver has already validated
+    /// and stripped: TL, the optional T0/TA(1)/TB(1)/TC(1) interface bytes
+    /// and the historical bytes, with no epilogue.
+    ///
+    /// Use [`Ats::try_from`] for bytes that came off the air unverified.
     ///
     /// TL counts itself and every following ATS byte but not the CRC
     /// (§5.2.2), so it must match `body.len()` exactly. Every field is read
@@ -94,7 +97,7 @@ impl Ats {
     ///   interface or historical bytes.
     /// - Any advertised interface byte the body is too short to hold →
     ///   [`TypeAError::InvalidLength`].
-    fn parse_body(body: &[u8]) -> Result<Self, TypeAError> {
+    pub fn from_crc_verified(body: &[u8]) -> Result<Self, TypeAError> {
         let length = *body.first().ok_or(TypeAError::InvalidLength)?;
         if usize::from(length) != body.len() {
             return Err(TypeAError::InvalidLength);
@@ -148,20 +151,10 @@ fn take_byte(body: &[u8], offset: &mut usize) -> Result<u8, TypeAError> {
 impl TryFrom<&[u8]> for Ats {
     type Error = TypeAError;
 
-    /// Parse an ATS frame: the ATS body followed by its two CRC_A bytes.
+    /// Parse an ATS frame off the wire: the ATS body followed by its two
+    /// CRC_A bytes, which must match the data.
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let body_len = value
-            .len()
-            .checked_sub(2)
-            .ok_or(TypeAError::InvalidLength)?;
-        let (body, crc) = value.split_at(body_len);
-
-        let good = crc_a(body);
-        if good != (crc[0], crc[1]) && (0, 0) != (crc[0], crc[1]) {
-            return Err(TypeAError::InvalidCrc(good));
-        }
-
-        Self::parse_body(body)
+        Self::from_crc_verified(split_crc_a(value)?)
     }
 }
 
@@ -403,7 +396,7 @@ mod tests {
 
 #[cfg(test)]
 mod parse_tests {
-    use super::super::crc::append_crc_a;
+    use super::super::crc::{append_crc_a, crc_a};
     use super::*;
 
     /// Append the real CRC_A to an ATS body.

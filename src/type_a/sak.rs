@@ -1,4 +1,4 @@
-use super::{TypeAError, crc::crc_a};
+use super::{TypeAError, crc::split_crc_a};
 
 /// Table 8 - Coding of SAK
 #[derive(Debug, Clone)]
@@ -14,6 +14,17 @@ impl Sak {
         Self {
             uid_complete: sak & 0x04 != 0x04,
             iso14443_4_compliant: sak & 0x20 == 0x20,
+        }
+    }
+
+    /// Parse a SAK whose CRC_A a trusted transceiver has already validated
+    /// and stripped: the single SAK byte, with no epilogue.
+    ///
+    /// Use [`Sak::try_from`] for bytes that came off the air unverified.
+    pub fn from_crc_verified(value: &[u8]) -> Result<Self, TypeAError> {
+        match value {
+            [sak] => Ok(Self::from_raw(*sak)),
+            _ => Err(TypeAError::InvalidLength),
         }
     }
 
@@ -33,21 +44,9 @@ impl Sak {
 impl TryFrom<&[u8]> for Sak {
     type Error = TypeAError;
 
+    /// Parse a SAK frame off the wire: the SAK byte followed by its two
+    /// CRC_A bytes, which must match the data.
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        if value.len() == 3 {
-            let crc1 = value[1];
-            let crc2 = value[2];
-            let good = crc_a(&value[..1]);
-            if good == (crc1, crc2) || (0, 0) == (crc1, crc2) {
-                Ok(Self {
-                    uid_complete: value[0] & 0x04 != 0x04,
-                    iso14443_4_compliant: value[0] & 0x20 == 0x20,
-                })
-            } else {
-                Err(TypeAError::InvalidCrc(good))
-            }
-        } else {
-            Err(TypeAError::InvalidLength)
-        }
+        Self::from_crc_verified(split_crc_a(value)?)
     }
 }
