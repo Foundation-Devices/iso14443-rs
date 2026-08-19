@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: © 2026 Foundation Devices, Inc. <hello@foundation.xyz>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Actions in .github/workflows are pinned to commit SHAs, so nothing moves
+# under us — the flip side is that security fixes upstream do not reach us
+# either until someone bumps the pin. Dependabot opens that bump as a pull
+# request, where the new SHA and the release it names can be reviewed.
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

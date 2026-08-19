@@ -1,12 +1,25 @@
 # SPDX-FileCopyrightText: © 2025 Foundation Devices, Inc. <hello@foundation.xyz>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Every external action is referenced by full commit SHA, with the release
+# it corresponds to in a trailing comment. A tag or branch can be moved to
+# other code by whoever controls the upstream repository; a commit SHA
+# cannot, so what runs here is what was reviewed. Dependabot proposes SHA
+# updates as reviewable pull requests (see ../dependabot.yml), and the
+# `pinning` job below fails if an unpinned reference sneaks back in.
+
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# These jobs only build and test: nothing writes to the repository,
+# publishes, or deploys. Declared here so the token's authority does not
+# depend on repository or organization defaults.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,9 +29,12 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
           components: rustfmt
       - run: cargo fmt --check
 
@@ -29,9 +45,12 @@ jobs:
       matrix:
         features: ["", "alloc", "std"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
           components: clippy
       - run: cargo clippy --features "${{ matrix.features }}" -- -D warnings
 
@@ -42,8 +61,12 @@ jobs:
       matrix:
         features: ["", "alloc", "std"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
       - run: cargo build --features "${{ matrix.features }}"
 
   test:
@@ -53,6 +76,30 @@ jobs:
       matrix:
         features: ["", "alloc", "std"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
       - run: cargo test --features "${{ matrix.features }}"
+
+  pinning:
+    name: Actions pinned to commit SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Check every `uses:` reference
+        run: |
+          # Local actions (`./path`) would need an exception here; there
+          # are none today, so every reference must carry a 40-hex SHA.
+          unpinned=$(grep -rhoE '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]]+' \
+            .github/workflows | awk '{print $NF}' | grep -vE '@[0-9a-f]{40}$' || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error::action reference is not pinned to a commit SHA:"
+            echo "$unpinned"
+            exit 1
+          fi
+          echo "all action references are pinned"
