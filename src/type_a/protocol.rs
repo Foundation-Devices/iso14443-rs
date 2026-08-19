@@ -7,6 +7,7 @@
 //! CID), and chain accumulation. Returns [`Action`]s that the caller (PCD or
 //! PICC transport layer) must execute.
 
+use super::limits::{Counters, Limit, Limits};
 use super::pcb::Pcb;
 use super::vec::{ChainVec, FrameVec, VecExt};
 use super::{Block, BlockType, Cid, RBlockSubtype, SBlockSubtype, TypeAError};
@@ -35,20 +36,44 @@ pub enum Action {
 /// Both PCD and PICC transport layers use this for the shared block-level
 /// protocol, adding their role-specific logic (I/O, CRC, error recovery)
 /// on top.
+///
+/// The peer decides how many blocks an exchange takes, so the handler
+/// counts them against its [`Limits`]: a card that answers every block with
+/// R(NAK) or S(WTX), or chains payload without end, is cut off with
+/// [`TypeAError::LimitExceeded`] rather than kept in the loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolHandler {
     cid: Option<Cid>,
     block_number: u8,
     chain: ChainVec,
+    limits: Limits,
+    counters: Counters,
 }
 
 impl ProtocolHandler {
     pub fn new(cid: Option<Cid>) -> Self {
+        Self::with_limits(cid, Limits::default())
+    }
+
+    /// Create a handler with non-default work limits.
+    pub fn with_limits(cid: Option<Cid>, limits: Limits) -> Self {
         Self {
             cid,
             block_number: 0,
             chain: ChainVec::new(),
+            limits,
+            counters: Counters::default(),
         }
+    }
+
+    /// The work limits applied to each exchange.
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Replace the work limits. Takes effect on the next exchange.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.limits = limits;
     }
 
     pub fn block_number(&self) -> u8 {
@@ -61,12 +86,34 @@ impl ProtocolHandler {
 
     pub fn reset(&mut self) {
         self.block_number = 0;
-        self.chain.clear();
+        self.begin_exchange();
     }
 
-    /// Reset chain accumulator between exchanges.
-    pub fn reset_chain(&mut self) {
-        self.chain.clear();
+    /// Start an exchange: drop any accumulated chain and reset the
+    /// per-exchange counters.
+    pub fn begin_exchange(&mut self) {
+        self.chain = ChainVec::new();
+        self.counters.reset();
+    }
+
+    /// Count one frame received from the peer against the exchange's frame
+    /// budget.
+    ///
+    /// [`ProtocolHandler::process_received`] does this itself; call it for
+    /// frames answered outside the block layer, such as PPS, so they cannot
+    /// be repeated indefinitely either.
+    pub fn note_frame(&mut self) -> Result<(), TypeAError> {
+        self.counters.frames = self.counters.frames.saturating_add(1);
+        if self.counters.frames > self.limits.max_frames {
+            return Err(self.exceeded(Limit::Frames));
+        }
+        Ok(())
+    }
+
+    /// Fail the exchange, leaving no accumulated payload behind.
+    fn exceeded(&mut self, limit: Limit) -> TypeAError {
+        self.chain = ChainVec::new();
+        limit.into()
     }
 
     // ── Block builders ──────────────────────────────────────────────────
@@ -136,6 +183,8 @@ impl ProtocolHandler {
     /// - S(WTX) → return [`Action::Reply`] with S(WTX) echo.
     /// - S(DESELECT) → return [`Action::Reply`] with S(DESELECT) echo, reset.
     pub fn process_received(&mut self, block: Block) -> Result<Action, TypeAError> {
+        self.note_frame()?;
+
         match block.block_type() {
             BlockType::IBlock => self.process_iblock(block),
             BlockType::RBlock => self.process_rblock(block),
@@ -144,6 +193,10 @@ impl ProtocolHandler {
     }
 
     fn process_iblock(&mut self, block: Block) -> Result<Action, TypeAError> {
+        if self.chain.len() + block.payload.len() > self.limits.max_chain_len {
+            return Err(self.exceeded(Limit::ChainLength));
+        }
+        self.counters.note_progress();
         self.chain.try_extend(block.payload.as_slice())?;
 
         if block.is_chaining() {
@@ -163,23 +216,37 @@ impl ProtocolHandler {
         match block.pcb.r_subtype {
             Some(RBlockSubtype::Ack) => {
                 if block.block_number() == self.block_number {
+                    self.counters.note_progress();
                     self.toggle_block_number();
                     Ok(Action::ChainingAck)
                 } else {
+                    self.note_retransmit()?;
                     Ok(Action::ChainingRetransmit)
                 }
             }
             Some(RBlockSubtype::Nak) => {
                 // NAK → caller should retransmit last block
+                self.note_retransmit()?;
                 Ok(Action::ChainingRetransmit)
             }
             None => Err(TypeAError::InvalidPcb),
         }
     }
 
+    /// A retransmission request buys the peer nothing new; only so many in
+    /// a row are tolerated.
+    fn note_retransmit(&mut self) -> Result<(), TypeAError> {
+        self.counters.retransmissions = self.counters.retransmissions.saturating_add(1);
+        if self.counters.retransmissions > self.limits.max_retransmissions {
+            return Err(self.exceeded(Limit::Retransmissions));
+        }
+        Ok(())
+    }
+
     fn process_sblock(&mut self, block: Block) -> Result<Action, TypeAError> {
         match block.pcb.s_subtype {
             Some(SBlockSubtype::Wtx) => {
+                self.check_wtx(&block)?;
                 let resp = self.build_wtx_response(&block)?;
                 Ok(Action::Reply(resp))
             }
@@ -190,6 +257,33 @@ impl ProtocolHandler {
             }
             _ => Err(TypeAError::Other),
         }
+    }
+
+    /// Validate an S(WTX) request and count it.
+    ///
+    /// §7.3: the INF field is one byte whose low six bits code a WTXM of 1
+    /// to 59; 0 and 60 to 63 are RFU. A peer that keeps asking for more time
+    /// without ever answering is stopped by the WTX counters.
+    fn check_wtx(&mut self, block: &Block) -> Result<(), TypeAError> {
+        let wtxm = match block.payload.as_slice() {
+            [inf] => inf & 0x3f,
+            _ => return Err(self.exceeded(Limit::WtxValue)),
+        };
+        if !(1..=59).contains(&wtxm) {
+            return Err(self.exceeded(Limit::WtxValue));
+        }
+
+        self.counters.consecutive_wtx = self.counters.consecutive_wtx.saturating_add(1);
+        if self.counters.consecutive_wtx > self.limits.max_consecutive_wtx {
+            return Err(self.exceeded(Limit::ConsecutiveWtx));
+        }
+
+        self.counters.total_wtx = self.counters.total_wtx.saturating_add(1);
+        if self.counters.total_wtx > self.limits.max_total_wtx {
+            return Err(self.exceeded(Limit::TotalWtx));
+        }
+
+        Ok(())
     }
 }
 
@@ -412,6 +506,203 @@ mod tests {
         assert_eq!(handler.block_number(), 0);
 
         // Chain is cleared — next single I-Block should return only its payload
+        match handler.process_received(iblock(0, &[0xAA], false)).unwrap() {
+            Action::Complete(data) => assert_eq!(data.as_slice(), &[0xAA]),
+            other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    // ── Limit tests ─────────────────────────────────────────────────────
+
+    /// Assert that a peer ran past the given limit.
+    fn assert_limit(result: Result<Action, TypeAError>, limit: Limit) {
+        match result {
+            Err(TypeAError::LimitExceeded(hit)) if hit == limit => {}
+            other => panic!("expected {:?}, got {:?}", limit, other),
+        }
+    }
+
+    fn limited(limits: Limits) -> ProtocolHandler {
+        ProtocolHandler::with_limits(None, limits)
+    }
+
+    #[test]
+    fn nak_flood_terminates() {
+        let mut handler = limited(Limits {
+            max_retransmissions: 3,
+            ..Limits::default()
+        });
+
+        // Three R(NAK) in a row are tolerated, the fourth is not
+        for _ in 0..3 {
+            assert!(matches!(
+                handler.process_received(rnak(0)).unwrap(),
+                Action::ChainingRetransmit
+            ));
+        }
+        assert_limit(handler.process_received(rnak(0)), Limit::Retransmissions);
+    }
+
+    #[test]
+    fn rack_with_wrong_block_number_counts_as_retransmission() {
+        let mut handler = limited(Limits {
+            max_retransmissions: 1,
+            ..Limits::default()
+        });
+
+        // block_number is 0, so R(ACK) with 1 asks for a retransmission
+        assert!(matches!(
+            handler.process_received(rack(1)).unwrap(),
+            Action::ChainingRetransmit
+        ));
+        assert_limit(handler.process_received(rack(1)), Limit::Retransmissions);
+    }
+
+    #[test]
+    fn progress_clears_the_retransmission_count() {
+        let mut handler = limited(Limits {
+            max_retransmissions: 1,
+            ..Limits::default()
+        });
+
+        let _ = handler.process_received(rnak(0)).unwrap();
+        // A matching R(ACK) moves the exchange forward
+        assert!(matches!(
+            handler.process_received(rack(0)).unwrap(),
+            Action::ChainingAck
+        ));
+        // ...so the peer gets its retransmission budget back
+        assert!(matches!(
+            handler.process_received(rnak(1)).unwrap(),
+            Action::ChainingRetransmit
+        ));
+    }
+
+    #[test]
+    fn wtx_flood_terminates() {
+        let mut handler = limited(Limits {
+            max_consecutive_wtx: 2,
+            ..Limits::default()
+        });
+
+        for _ in 0..2 {
+            assert!(matches!(
+                handler.process_received(sblock_wtx(0x01)).unwrap(),
+                Action::Reply(_)
+            ));
+        }
+        assert_limit(
+            handler.process_received(sblock_wtx(0x01)),
+            Limit::ConsecutiveWtx,
+        );
+    }
+
+    #[test]
+    fn total_wtx_is_bounded_even_when_interleaved() {
+        let mut handler = limited(Limits {
+            max_consecutive_wtx: 1,
+            max_total_wtx: 2,
+            ..Limits::default()
+        });
+
+        // Each S(WTX) is followed by a chained I-Block, so the consecutive
+        // counter never trips — the per-exchange total still does.
+        for _ in 0..2 {
+            assert!(matches!(
+                handler.process_received(sblock_wtx(0x01)).unwrap(),
+                Action::Reply(_)
+            ));
+            assert!(matches!(
+                handler.process_received(iblock(0, &[0xAA], true)).unwrap(),
+                Action::Reply(_)
+            ));
+        }
+        assert_limit(handler.process_received(sblock_wtx(0x01)), Limit::TotalWtx);
+    }
+
+    #[test]
+    fn invalid_wtx_values_are_rejected() {
+        let mut handler = ProtocolHandler::new(None);
+
+        // WTXM is coded in the range 1 to 59; 0 and 60 to 63 are RFU
+        assert_limit(handler.process_received(sblock_wtx(0x00)), Limit::WtxValue);
+        assert_limit(handler.process_received(sblock_wtx(60)), Limit::WtxValue);
+        // The power level bits are not part of WTXM
+        assert!(matches!(
+            handler.process_received(sblock_wtx(0xC1)).unwrap(),
+            Action::Reply(_)
+        ));
+
+        // The INF field of an S(WTX) request is exactly one byte
+        let empty_wtx = Block::new(Pcb::new(BlockType::SBlock).with_s_subtype(SBlockSubtype::Wtx));
+        assert_limit(handler.process_received(empty_wtx), Limit::WtxValue);
+    }
+
+    #[test]
+    fn chain_length_is_bounded() {
+        let mut handler = limited(Limits {
+            max_chain_len: 4,
+            ..Limits::default()
+        });
+
+        assert!(matches!(
+            handler.process_received(iblock(0, &[1, 2], true)).unwrap(),
+            Action::Reply(_)
+        ));
+        assert!(matches!(
+            handler.process_received(iblock(1, &[3, 4], true)).unwrap(),
+            Action::Reply(_)
+        ));
+        assert_limit(
+            handler.process_received(iblock(0, &[5], true)),
+            Limit::ChainLength,
+        );
+    }
+
+    #[test]
+    fn frame_budget_is_bounded() {
+        let mut handler = limited(Limits {
+            max_frames: 2,
+            ..Limits::default()
+        });
+
+        let _ = handler.process_received(iblock(0, &[1], true)).unwrap();
+        let _ = handler.process_received(iblock(1, &[2], true)).unwrap();
+        assert_limit(
+            handler.process_received(iblock(0, &[3], true)),
+            Limit::Frames,
+        );
+
+        // Frames answered outside the block layer count too
+        let mut handler = limited(Limits {
+            max_frames: 1,
+            ..Limits::default()
+        });
+        handler.note_frame().unwrap();
+        assert_eq!(
+            handler.note_frame(),
+            Err(TypeAError::LimitExceeded(Limit::Frames))
+        );
+    }
+
+    #[test]
+    fn limit_error_leaves_a_clean_handler() {
+        let mut handler = limited(Limits {
+            max_chain_len: 4,
+            ..Limits::default()
+        });
+
+        let _ = handler
+            .process_received(iblock(0, &[1, 2, 3, 4], true))
+            .unwrap();
+        assert_limit(
+            handler.process_received(iblock(1, &[5], true)),
+            Limit::ChainLength,
+        );
+
+        // The accumulated payload is dropped, and the next exchange starts
+        // from a clean slate rather than inheriting counters or bytes.
+        handler.begin_exchange();
         match handler.process_received(iblock(0, &[0xAA], false)).unwrap() {
             Action::Complete(data) => assert_eq!(data.as_slice(), &[0xAA]),
             other => panic!("expected Complete, got {:?}", other),

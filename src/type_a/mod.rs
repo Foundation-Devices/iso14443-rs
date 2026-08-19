@@ -24,6 +24,7 @@ mod atqa;
 mod ats;
 mod block;
 pub(crate) mod crc;
+pub mod limits;
 mod pcb;
 pub mod pcd;
 pub mod picc;
@@ -102,6 +103,8 @@ pub enum TypeAError {
     UnknownSel,
     InvalidPcb,
     BufferFull,
+    /// A peer ran past one of the per-exchange work limits.
+    LimitExceeded(Limit),
     Other,
 }
 
@@ -302,6 +305,7 @@ impl TryFrom<&[u8]> for Command {
 // Re-export block-related types
 pub use ats::{Fsci, Fwi, Sfgi, Ta, Tb, Tc};
 pub use block::Block;
+pub use limits::{Limit, Limits};
 pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
 pub use pcd::{Pcd, PcdError};
 pub use picc::{Picc, PiccConfig, PiccError, Uid};

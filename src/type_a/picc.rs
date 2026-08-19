@@ -11,6 +11,7 @@ use super::{
     anticol_select::{SEL_CL1, SEL_CL2, SEL_CL3},
     atqa::AtqA,
     crc::{append_crc_a, split_crc_a},
+    limits::{Limit, Limits},
     pcb::SBlockSubtype,
     pps::PpsParam,
     protocol::{Action, ProtocolHandler},
@@ -171,6 +172,16 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
         }
     }
 
+    /// The work limits applied to each exchange.
+    pub fn limits(&self) -> &Limits {
+        self.handler.limits()
+    }
+
+    /// Replace the work limits. Takes effect on the next exchange.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.handler.set_limits(limits);
+    }
+
     /// Wait for ISO14443-3A activation.
     ///
     /// Handles REQA → ATQA → anticollision cascade → SELECT → SAK.
@@ -230,7 +241,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
     /// Handles PPS (if the PCD sends it), I-Block chaining (sends R(ACK)
     /// for each chained block), S(WTX) echo, and S(DESELECT).
     pub fn receive_command(&mut self) -> Result<ChainVec, PiccError<T::Error>> {
-        self.handler.reset_chain();
+        self.handler.begin_exchange();
         loop {
             let raw = self
                 .transceiver
@@ -239,6 +250,8 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
 
             // PPS: starts with 0xDx where x is CID
             if !raw.is_empty() && raw[0] & 0xF0 == 0xD0 {
+                // Answered outside the block layer, so count it explicitly
+                self.handler.note_frame()?;
                 self.handle_pps(&raw)?;
                 continue;
             }
@@ -385,7 +398,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 let rats = RatsParam::try_from(param_byte)?;
                 self.fsd = rats.fsdi().fsd();
                 let cid = Cid::new(rats.cid().value());
-                self.handler = ProtocolHandler::new(cid);
+                self.handler = ProtocolHandler::with_limits(cid, *self.handler.limits());
 
                 // Send ATS
                 self.send_ats()?;
@@ -482,8 +495,28 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
             .map_err(PiccError::PiccTransceiver)
     }
 
+    /// Parse a received command frame into a Block.
+    ///
+    /// The ATS told the PCD how large a frame this card accepts (FSC);
+    /// anything longer is refused before it is parsed or accumulated.
     fn parse_block(&self, raw: &[u8]) -> Result<Block, PiccError<T::Error>> {
+        let on_air_len = if self.hw_crc {
+            raw.len() + 2
+        } else {
+            raw.len()
+        };
+        if on_air_len > self.fsc() {
+            return Err(PiccError::Protocol(Limit::FrameSize.into()));
+        }
         Ok(Block::from_crc_verified(self.strip_crc(raw)?)?)
+    }
+
+    /// Maximum frame size this card accepts, as advertised in its ATS.
+    fn fsc(&self) -> usize {
+        self.config
+            .ats
+            .as_ref()
+            .map_or(256, |ats| ats.format.fsci.fsc())
     }
 
     /// Return the command data of a received standard frame.
@@ -838,5 +871,142 @@ mod tests {
             Err(PiccError::Protocol(TypeAError::InvalidCrc(_))) => {}
             other => panic!("expected Protocol(InvalidCrc), got {:?}", other),
         }
+    }
+
+    // ── Limit tests ─────────────────────────────────────────────────────
+
+    /// Activation frames followed by `commands`, ready for receive_command().
+    fn activated(commands: Vec<FrameVec>) -> Vec<FrameVec> {
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04];
+        let mut receives = vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            select_cmd(0x93, &uid_bcc),
+            rats_cmd(8, 0),
+        ];
+        receives.extend(commands);
+        receives
+    }
+
+    /// A chained I-Block command with the given payload.
+    fn chained_iblock(block_number: u8, payload: &[u8]) -> FrameVec {
+        let pcb = Pcb::new(BlockType::IBlock)
+            .with_block_number(block_number)
+            .with_chaining(true);
+        Block::new(pcb)
+            .with_payload(frame_vec(payload))
+            .to_vec()
+            .unwrap()
+    }
+
+    fn assert_limit<E: core::fmt::Debug>(result: Result<ChainVec, PiccError<E>>, limit: Limit) {
+        match result {
+            Err(PiccError::Protocol(TypeAError::LimitExceeded(hit))) if hit == limit => {}
+            other => panic!("expected {:?}, got {:?}", limit, other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn command_chaining_is_bounded() {
+        // A reader that chains command I-Blocks without end cannot grow the
+        // card's assembled APDU past max_chain_len.
+        let receives = activated(vec![chained_iblock(0, &[0xAA; 4]); 20]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.set_limits(Limits {
+            max_chain_len: 8,
+            ..Limits::default()
+        });
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        assert_limit(picc.receive_command(), Limit::ChainLength);
+    }
+
+    #[test]
+    fn command_frame_budget_is_bounded() {
+        let receives = activated(vec![chained_iblock(0, &[0xAA]); 20]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.set_limits(Limits {
+            max_frames: 3,
+            ..Limits::default()
+        });
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        assert_limit(picc.receive_command(), Limit::Frames);
+    }
+
+    #[test]
+    fn repeated_pps_is_bounded() {
+        // PPS is answered outside the block layer, so it needs the frame
+        // budget of its own to not become a free loop.
+        let pps = append_crc_a(&[0xd0, 0x11, 0x00]).unwrap();
+        let receives = activated(vec![pps; 20]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.set_limits(Limits {
+            max_frames: 4,
+            ..Limits::default()
+        });
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        assert_limit(picc.receive_command(), Limit::Frames);
+    }
+
+    #[test]
+    fn oversized_command_is_rejected() {
+        // The card's ATS announces FSC 16, so a longer command frame is
+        // refused before it is parsed or accumulated.
+        let mut config = test_config_4byte();
+        {
+            use super::super::ats::{Fsci, Ta, Tb, Tc};
+            config.enable_14443_4(Ats::new(
+                Fsci::Fsc16,
+                Ta::SAME_D_SUPP,
+                Tb::default(),
+                Tc::CID_SUPP,
+            ));
+        }
+        let receives = activated(vec![chained_iblock(0, &[0xAA; 20])]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, config);
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        assert_limit(picc.receive_command(), Limit::FrameSize);
+    }
+
+    #[test]
+    fn state_is_clean_after_a_limit_error() {
+        let good = {
+            let pcb = Pcb::new(BlockType::IBlock).with_block_number(0);
+            Block::new(pcb)
+                .with_payload(frame_vec(&[0x90, 0x00]))
+                .to_vec()
+                .unwrap()
+        };
+        let mut commands = vec![chained_iblock(0, &[0xAA; 4]); 3];
+        commands.push(good);
+        let receives = activated(commands);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.set_limits(Limits {
+            max_chain_len: 8,
+            ..Limits::default()
+        });
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+
+        assert_limit(picc.receive_command(), Limit::ChainLength);
+        // The dropped chain is not prepended to the next command
+        assert_eq!(picc.receive_command().unwrap().as_slice(), &[0x90, 0x00]);
     }
 }

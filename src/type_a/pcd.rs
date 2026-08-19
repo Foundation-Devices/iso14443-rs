@@ -11,6 +11,7 @@ use super::{
     Block, Cid, Frame, PcdTransceiver, TypeAError,
     ats::Ats,
     crc::append_crc_a,
+    limits::{Limit, Limits},
     pcb::{BlockType, SBlockSubtype},
     pps::{Dxi, PpsParam, PpsResp},
     protocol::{Action, ProtocolHandler},
@@ -45,6 +46,8 @@ pub struct Pcd<'t, T: PcdTransceiver> {
     hw_crc: bool,
     /// Maximum frame size the PICC accepts (from ATS FSCI).
     fsc: usize,
+    /// Maximum frame size we told the PICC we accept (from RATS FSDI).
+    fsd: usize,
     handler: ProtocolHandler,
 }
 
@@ -85,6 +88,7 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
                 transceiver: t,
                 hw_crc,
                 fsc,
+                fsd: fsdi.fsd(),
                 handler: ProtocolHandler::new(Some(cid)),
             },
             ats,
@@ -93,13 +97,33 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
 
     /// Manual setup for callers who have already handled RATS/ATS
     /// externally (e.g. via the CLI parser).
-    pub fn new(transceiver: &'t mut T, ats: &Ats, cid: Option<Cid>, hw_crc: bool) -> Self {
+    ///
+    /// `fsdi` must be the frame size the RATS announced, since responses
+    /// larger than that FSD are rejected.
+    pub fn new(
+        transceiver: &'t mut T,
+        ats: &Ats,
+        fsdi: Fsdi,
+        cid: Option<Cid>,
+        hw_crc: bool,
+    ) -> Self {
         Self {
             transceiver,
             hw_crc,
             fsc: ats.format.fsci.fsc(),
+            fsd: fsdi.fsd(),
             handler: ProtocolHandler::new(cid),
         }
+    }
+
+    /// The work limits applied to each exchange.
+    pub fn limits(&self) -> &Limits {
+        self.handler.limits()
+    }
+
+    /// Replace the work limits. Takes effect on the next exchange.
+    pub fn set_limits(&mut self, limits: Limits) {
+        self.handler.set_limits(limits);
     }
 
     /// Negotiate bit rates via PPS (optional, call after connect/new).
@@ -144,7 +168,7 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
     /// Handles chaining in both directions, S(WTX) responses, and error
     /// recovery per ISO14443-4 §7.5.
     pub fn exchange(&mut self, apdu: &[u8]) -> Result<ChainVec, PcdError<T::Error>> {
-        self.handler.reset_chain();
+        self.handler.begin_exchange();
 
         // Max payload per I-Block: FSC minus prologue (PCB + optional CID)
         // minus epilogue (2-byte CRC).
@@ -288,11 +312,21 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
     }
 
     /// Parse a raw response into a Block, handling the CRC strategy.
+    ///
+    /// The RATS told the PICC how large a frame we accept; anything longer
+    /// is refused before it is parsed or accumulated.
     fn parse_block_response(&self, raw: &[u8]) -> Result<Block, PcdError<T::Error>> {
         if self.hw_crc {
-            // The transceiver already validated the CRC and stripped it
+            // The transceiver already validated the CRC and stripped it, so
+            // the frame was two bytes longer on the air
+            if raw.len() + 2 > self.fsd {
+                return Err(PcdError::Protocol(Limit::FrameSize.into()));
+            }
             Ok(Block::from_crc_verified(raw)?)
         } else {
+            if raw.len() > self.fsd {
+                return Err(PcdError::Protocol(Limit::FrameSize.into()));
+            }
             Ok(Block::try_from(raw)?)
         }
     }
@@ -407,7 +441,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![resp]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         let result = pcd.exchange(&[0x01, 0x02]).unwrap();
 
         assert_eq!(result.as_slice(), &[0xAA, 0xBB]);
@@ -422,7 +456,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![ack, resp]);
         let ats = small_fsc_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         let result = pcd.exchange(&[0x42u8; 20]).unwrap();
 
         assert_eq!(result.as_slice(), &[0xFF]);
@@ -436,7 +470,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![resp1, resp2]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         let result = pcd.exchange(&[0xAA]).unwrap();
 
         assert_eq!(result.as_slice(), &[0x01, 0x02, 0x03, 0x04]);
@@ -450,7 +484,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![wtx, resp]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         let result = pcd.exchange(&[0x01]).unwrap();
 
         assert_eq!(result.as_slice(), &[0xCC]);
@@ -463,7 +497,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![resp]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         pcd.deselect().unwrap();
     }
 
@@ -474,7 +508,7 @@ mod tests {
         let mut t = MockTransceiver::new(false, vec![bad_resp, good_resp]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         pcd.deselect().unwrap();
         assert_eq!(t.sent.len(), 2);
     }
@@ -488,7 +522,7 @@ mod tests {
         let mut t = MockTransceiver::new(true, vec![raw_no_crc]);
         let ats = minimal_ats();
 
-        let mut pcd = Pcd::new(&mut t, &ats, None, true);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, true);
         let result = pcd.exchange(&[0x01]).unwrap();
 
         assert_eq!(result.as_slice(), &[0xDE, 0xAD]);
@@ -547,7 +581,7 @@ mod tests {
 
         let mut t = MockTransceiver::new(false, vec![raw]);
         let ats = minimal_ats();
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
 
         match pcd.exchange(&[0x01]) {
             Err(PcdError::Protocol(TypeAError::InvalidCrc(_))) => {}
@@ -560,7 +594,7 @@ mod tests {
         let resp = mock_iblock_response(0, &[0xAA, 0xBB], false);
         let mut t = MockTransceiver::new(false, vec![resp]);
         let ats = minimal_ats();
-        let mut pcd = Pcd::new(&mut t, &ats, None, false);
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
 
         assert_eq!(pcd.exchange(&[0x01]).unwrap().as_slice(), &[0xAA, 0xBB]);
     }
@@ -586,5 +620,115 @@ mod tests {
         let mut t = MockTransceiver::new(true, vec![frame_vec(&[0x05, 0x78, 0x80, 0x40, 0x02])]);
         let (_pcd, ats) = Pcd::connect(&mut t, Fsdi::Fsd256, Cid::new(0).unwrap()).unwrap();
         assert_eq!(ats.length, 5);
+    }
+
+    // ── Limit tests ─────────────────────────────────────────────────────
+
+    fn mock_rnak_response(block_number: u8) -> FrameVec {
+        let pcb = Pcb::new(BlockType::RBlock)
+            .with_block_number(block_number)
+            .with_r_subtype(RBlockSubtype::Nak);
+        Block::new(pcb).to_vec().unwrap()
+    }
+
+    fn assert_limit<E: core::fmt::Debug>(result: Result<ChainVec, PcdError<E>>, limit: Limit) {
+        match result {
+            Err(PcdError::Protocol(TypeAError::LimitExceeded(hit))) if hit == limit => {}
+            other => panic!("expected {:?}, got {:?}", limit, other.map(|_| ())),
+        }
+    }
+
+    #[test]
+    fn send_chaining_nak_flood_terminates() {
+        // A card that answers every chunk with a valid R(NAK) keeps the
+        // reader retransmitting; the retransmission budget stops it.
+        let mut t = MockTransceiver::new(false, vec![mock_rnak_response(0); 20]);
+        let ats = small_fsc_ats(); // FSC 16 → 20 bytes of APDU chain
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+
+        assert_limit(pcd.exchange(&[0x42u8; 20]), Limit::Retransmissions);
+        // First transmission plus max_retransmissions retries, nothing more
+        assert_eq!(t.sent.len(), 4);
+    }
+
+    #[test]
+    fn response_chaining_is_bounded() {
+        // A card that chains I-Blocks without ever ending the chain cannot
+        // grow the assembled payload past max_chain_len.
+        let mut t =
+            MockTransceiver::new(false, vec![mock_iblock_response(0, &[0xAA; 4], true); 20]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+        pcd.set_limits(Limits {
+            max_chain_len: 8,
+            ..Limits::default()
+        });
+
+        assert_limit(pcd.exchange(&[0x01]), Limit::ChainLength);
+        assert!(t.sent.len() <= 4);
+    }
+
+    #[test]
+    fn response_frame_budget_is_bounded() {
+        let mut t = MockTransceiver::new(false, vec![mock_iblock_response(0, &[0xAA], true); 20]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+        pcd.set_limits(Limits {
+            max_frames: 3,
+            ..Limits::default()
+        });
+
+        assert_limit(pcd.exchange(&[0x01]), Limit::Frames);
+    }
+
+    #[test]
+    fn wtx_flood_terminates() {
+        // S(WTX) is a valid, well-formed block; only the WTX budget ends
+        // a card that asks for more time forever.
+        let mut t = MockTransceiver::new(false, vec![mock_wtx_request(0x01); 20]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+
+        let tolerated = usize::from(pcd.limits().max_consecutive_wtx);
+        assert_limit(pcd.exchange(&[0x01]), Limit::ConsecutiveWtx);
+        // The initial I-Block plus one acknowledgement per tolerated S(WTX)
+        assert_eq!(t.sent.len(), 1 + tolerated);
+    }
+
+    #[test]
+    fn invalid_wtx_multiplier_terminates() {
+        // WTXM 0 is RFU
+        let mut t = MockTransceiver::new(false, vec![mock_wtx_request(0x00); 4]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+
+        assert_limit(pcd.exchange(&[0x01]), Limit::WtxValue);
+        assert_eq!(t.sent.len(), 1);
+    }
+
+    #[test]
+    fn oversized_response_is_rejected() {
+        // The RATS announced FSD 16, so a 23-byte response frame is refused
+        // before it is parsed or accumulated.
+        let mut t = MockTransceiver::new(false, vec![mock_iblock_response(0, &[0xAA; 20], false)]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd16, None, false);
+
+        assert_limit(pcd.exchange(&[0x01]), Limit::FrameSize);
+    }
+
+    #[test]
+    fn state_is_clean_after_a_limit_error() {
+        // Nine S(WTX) trip the default consecutive budget, then a fresh
+        // exchange runs normally: counters and chain start over.
+        let mut responses = vec![mock_wtx_request(0x01); 9];
+        responses.push(mock_iblock_response(1, &[0x90, 0x00], false));
+
+        let mut t = MockTransceiver::new(false, responses);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
+
+        assert_limit(pcd.exchange(&[0x01]), Limit::ConsecutiveWtx);
+        assert_eq!(pcd.exchange(&[0x02]).unwrap().as_slice(), &[0x90, 0x00]);
     }
 }

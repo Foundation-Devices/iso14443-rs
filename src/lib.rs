@@ -13,6 +13,7 @@
 //! - [`type_a::PcdTransceiver`] — implement for your reader hardware (atomic send+receive)
 //! - [`type_a::PiccTransceiver`] — implement for card emulation hardware (separate receive/send)
 //! - [`type_a::ProtocolHandler`] — generic block protocol state machine, used by both sides
+//! - [`type_a::Limits`] — per-exchange work limits, so a hostile peer cannot keep either side looping
 //!
 //! ## Quick start (PCD)
 //!
