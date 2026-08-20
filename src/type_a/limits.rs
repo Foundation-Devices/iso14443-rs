@@ -74,8 +74,9 @@ pub struct Limits {
     /// Bounds the total work of an exchange whatever the peer sends, since
     /// each block costs it a frame. Default: 512.
     pub max_frames: u16,
-    /// Maximum number of consecutive requests to retransmit the same block:
-    /// R(NAK), or R(ACK) carrying the wrong block number. Default: 3.
+    /// Maximum number of consecutive requests to retransmit the same block
+    /// — R(NAK), or R(ACK) carrying the wrong block number — or repeats of
+    /// a block already taken in. Default: 3.
     pub max_retransmissions: u8,
     /// Maximum number of S(WTX) requests in a row, with no block carrying
     /// the exchange forward in between. Default: 8.

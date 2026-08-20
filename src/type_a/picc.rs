@@ -14,7 +14,7 @@ use super::{
     limits::{Limit, Limits},
     pcb::SBlockSubtype,
     pps::PpsParam,
-    protocol::{Action, ProtocolHandler},
+    protocol::{Action, ProtocolHandler, Role},
     rats::RatsParam,
     vec::{ChainVec, FrameVec, VecExt},
 };
@@ -166,7 +166,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
             transceiver: t,
             hw_crc,
             config,
-            handler: ProtocolHandler::new(None),
+            handler: ProtocolHandler::new(Role::Picc, None),
             state: PiccState::Idle,
             fsd: 256, // default until RATS
         }
@@ -295,11 +295,20 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
         while offset < data.len() {
             let end = core::cmp::min(offset + max_inf, data.len());
             let chaining = end < data.len();
+            // Rule D toggled the block number when the command came in, so
+            // the I-Block is built with the number it should carry and the
+            // PICC does not toggle again on the way out.
             let iblock = self.handler.build_iblock(&data[offset..end], chaining)?;
             self.send_block(&iblock)?;
 
-            if chaining {
-                // Wait for R(ACK)
+            if !chaining {
+                break;
+            }
+
+            // Wait for the R(ACK) that releases the next chunk. Rule 11 can
+            // ask for this one again, and Rule 12 for an R(ACK) in between;
+            // the work limits bound how long that can go on.
+            loop {
                 let raw = self
                     .transceiver
                     .receive()
@@ -308,12 +317,23 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 match self.handler.process_received(block)? {
                     Action::ChainingAck => {
                         offset = end;
+                        break;
+                    }
+                    Action::ChainingRetransmit => {
+                        self.send_block(&iblock)?;
+                    }
+                    Action::Reply(reply) => {
+                        // §7.5.5: an S(DESELECT) is accepted at any time,
+                        // chaining included.
+                        let deselect = reply.pcb.s_subtype == Some(SBlockSubtype::Deselect);
+                        self.send_block(&reply)?;
+                        if deselect {
+                            self.state = PiccState::Halted;
+                            return Err(PiccError::Deselected);
+                        }
                     }
                     _ => return Err(PiccError::Protocol(TypeAError::Other)),
                 }
-            } else {
-                self.handler.toggle_block_number();
-                offset = end;
             }
         }
         Ok(())
@@ -398,7 +418,8 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 let rats = RatsParam::try_from(param_byte)?;
                 self.fsd = rats.fsdi().fsd();
                 let cid = Cid::new(rats.cid().value());
-                self.handler = ProtocolHandler::with_limits(cid, *self.handler.limits());
+                self.handler =
+                    ProtocolHandler::with_limits(Role::Picc, cid, *self.handler.limits());
 
                 // Send ATS
                 self.send_ats()?;
@@ -572,7 +593,7 @@ mod tests {
     use std::vec::Vec;
 
     use super::super::crc::append_crc_a;
-    use super::super::pcb::{BlockType, Pcb};
+    use super::super::pcb::{BlockType, Pcb, RBlockSubtype};
     use super::super::vec::VecExt;
     use super::*;
 
@@ -871,6 +892,211 @@ mod tests {
         }
     }
 
+    // ── A reader that follows the numbering rules ────────────────────────
+
+    /// A PCD that applies §7.5.3 and §7.5.4 literally, driving the card
+    /// through whole exchanges instead of replaying a fixed script.
+    ///
+    /// Rule A: block number initialised to 0. Rule B: toggle when an
+    /// I-Block or an R(ACK) carrying the current number arrives. Rule 7:
+    /// that R(ACK) releases the next chunk. Rule 6: any other number asks
+    /// for the last chunk again.
+    struct SpecReader {
+        /// Activation frames, handed over before the block protocol starts.
+        prelude: Vec<FrameVec>,
+        prelude_idx: usize,
+        block_number: u8,
+        /// One entry per exchange: the command, split into chained chunks.
+        commands: Vec<Vec<Vec<u8>>>,
+        command: usize,
+        chunk: usize,
+        /// The frame the card is handed next.
+        pending: Option<FrameVec>,
+        /// Response APDUs as the reader assembled them.
+        assembled: Vec<Vec<u8>>,
+        partial: Vec<u8>,
+        /// How often Rule 6 fired, or a repeated I-Block turned up. A card
+        /// in step causes neither.
+        repeats: usize,
+    }
+
+    impl SpecReader {
+        fn new(prelude: Vec<FrameVec>, commands: Vec<Vec<Vec<u8>>>) -> Self {
+            Self {
+                prelude,
+                prelude_idx: 0,
+                block_number: 0, // Rule A
+                commands,
+                command: 0,
+                chunk: 0,
+                pending: None,
+                assembled: Vec::new(),
+                partial: Vec::new(),
+                repeats: 0,
+            }
+        }
+
+        fn queue(&mut self, block: Block) {
+            self.pending = Some(block.to_vec().unwrap());
+        }
+
+        /// Send the chunk the reader is on, chained unless it is the last.
+        fn queue_chunk(&mut self) {
+            let chunks = &self.commands[self.command];
+            let payload = chunks[self.chunk].clone();
+            let chaining = self.chunk + 1 < chunks.len();
+            let pcb = Pcb::new(BlockType::IBlock)
+                .with_block_number(self.block_number)
+                .with_chaining(chaining);
+            self.queue(Block::new(pcb).with_payload(frame_vec(&payload)));
+        }
+
+        fn queue_rack(&mut self) {
+            let pcb = Pcb::new(BlockType::RBlock)
+                .with_block_number(self.block_number)
+                .with_r_subtype(RBlockSubtype::Ack);
+            self.queue(Block::new(pcb));
+        }
+
+        /// React to a block from the card.
+        fn handle(&mut self, block: Block) {
+            match block.block_type() {
+                BlockType::RBlock => {
+                    if block.block_number() == self.block_number {
+                        // Rules B and 7: chunk taken, carry on
+                        self.block_number = 1 - self.block_number;
+                        self.chunk += 1;
+                    } else {
+                        // Rule 6: send the same chunk again
+                        self.repeats += 1;
+                    }
+                    self.queue_chunk();
+                }
+                BlockType::IBlock => {
+                    if block.block_number() != self.block_number {
+                        // Rule B did not fire: a block already taken in
+                        self.repeats += 1;
+                        self.queue_rack();
+                        return;
+                    }
+                    self.block_number = 1 - self.block_number;
+                    self.partial.extend_from_slice(block.payload.as_slice());
+                    if block.is_chaining() {
+                        // Rule 2
+                        self.queue_rack();
+                    } else {
+                        let apdu = core::mem::take(&mut self.partial);
+                        self.assembled.push(apdu);
+                        self.command += 1;
+                        self.chunk = 0;
+                        if self.command < self.commands.len() {
+                            self.queue_chunk();
+                        }
+                    }
+                }
+                BlockType::SBlock => {}
+            }
+        }
+    }
+
+    impl PiccTransceiver for SpecReader {
+        type Error = MockError;
+
+        fn receive(&mut self) -> Result<FrameVec, MockError> {
+            if self.prelude_idx < self.prelude.len() {
+                let frame = self.prelude[self.prelude_idx].clone();
+                self.prelude_idx += 1;
+                return Ok(frame);
+            }
+            self.pending.take().ok_or(MockError)
+        }
+
+        fn send(&mut self, frame: &Frame) -> Result<(), MockError> {
+            if self.prelude_idx < self.prelude.len() {
+                return Ok(()); // ATQA, UID, SAK — still activating
+            }
+            match Block::try_from(frame.data()) {
+                // The ATS, sent once the last prelude frame (RATS) is in:
+                // the block protocol starts with the reader's first command
+                Err(_) => self.queue_chunk(),
+                Ok(block) => self.handle(block),
+            }
+            Ok(())
+        }
+
+        fn try_enable_hw_crc(&mut self) -> Result<(), MockError> {
+            Err(MockError)
+        }
+    }
+
+    /// Activation frames a reader sends before the block protocol.
+    fn prelude() -> Vec<FrameVec> {
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04]; // 0x04 is the BCC
+        vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            select_cmd(0x93, &uid_bcc),
+            rats_cmd(5, 0), // FSDI 5 → FSD 64
+        ]
+    }
+
+    /// Run `commands` against a card that echoes each APDU back with a
+    /// status word, and return the reader for inspection.
+    fn run_exchanges(commands: Vec<Vec<Vec<u8>>>) -> SpecReader {
+        let count = commands.len();
+        let mut reader = SpecReader::new(prelude(), commands);
+        {
+            let mut picc = Picc::new(&mut reader, test_config_4byte());
+            picc.wait_for_activation().unwrap();
+            picc.wait_for_rats().unwrap();
+
+            for i in 0..count {
+                let apdu = picc.receive_command().unwrap_or_else(|e| {
+                    panic!("exchange {i}: receive_command failed: {e:?}");
+                });
+                let mut response: Vec<u8> = apdu.as_slice().to_vec();
+                response.extend_from_slice(&[0x90, 0x00]);
+                picc.send_response(&response)
+                    .unwrap_or_else(|e| panic!("exchange {i}: send_response failed: {e:?}"));
+            }
+        }
+        reader
+    }
+
+    #[test]
+    fn spec_reader_single_block_exchanges() {
+        let reader = run_exchanges(vec![
+            vec![vec![0x00, 0xA4]],
+            vec![vec![0x00, 0xB0]],
+            vec![vec![0x00, 0xB1]],
+        ]);
+
+        assert_eq!(
+            reader.assembled,
+            vec![
+                vec![0x00, 0xA4, 0x90, 0x00],
+                vec![0x00, 0xB0, 0x90, 0x00],
+                vec![0x00, 0xB1, 0x90, 0x00],
+            ]
+        );
+        assert_eq!(reader.repeats, 0, "the reader had to repeat a block");
+    }
+
+    #[test]
+    fn spec_reader_chained_command_and_response() {
+        // The card's ATS announces FSC 256 but the RATS announced FSD 64,
+        // so a 100-byte echo comes back chained. The command is chained
+        // too, which exercises Rules D, E and 13 in one exchange.
+        let command: Vec<u8> = (0..100u8).collect();
+        let chunks: Vec<Vec<u8>> = command.chunks(30).map(<[u8]>::to_vec).collect();
+        let reader = run_exchanges(vec![chunks.clone(), chunks]);
+
+        let mut expected = command.clone();
+        expected.extend_from_slice(&[0x90, 0x00]);
+        assert_eq!(reader.assembled, vec![expected.clone(), expected]);
+        assert_eq!(reader.repeats, 0, "the reader had to repeat a block");
+    }
+
     // ── Limit tests ─────────────────────────────────────────────────────
 
     /// Activation frames followed by `commands`, ready for receive_command().
@@ -897,6 +1123,14 @@ mod tests {
             .unwrap()
     }
 
+    /// `count` chained I-Block commands with the same payload, numbered the
+    /// way a reader in step with the card numbers them: 0, 1, 0, 1, …
+    fn chained_command(count: usize, payload: &[u8]) -> Vec<FrameVec> {
+        (0..count)
+            .map(|i| chained_iblock((i % 2) as u8, payload))
+            .collect()
+    }
+
     fn assert_limit<E: core::fmt::Debug>(result: Result<ChainVec, PiccError<E>>, limit: Limit) {
         match result {
             Err(PiccError::Protocol(TypeAError::LimitExceeded(hit))) if hit == limit => {}
@@ -908,7 +1142,7 @@ mod tests {
     fn command_chaining_is_bounded() {
         // A reader that chains command I-Blocks without end cannot grow the
         // card's assembled APDU past max_chain_len.
-        let receives = activated(vec![chained_iblock(0, &[0xAA; 4]); 20]);
+        let receives = activated(chained_command(20, &[0xAA; 4]));
 
         let mut t = MockPiccTransceiver::new(receives);
         let mut picc = Picc::new(&mut t, test_config_4byte());
@@ -924,7 +1158,7 @@ mod tests {
 
     #[test]
     fn command_frame_budget_is_bounded() {
-        let receives = activated(vec![chained_iblock(0, &[0xAA]); 20]);
+        let receives = activated(chained_command(20, &[0xAA]));
 
         let mut t = MockPiccTransceiver::new(receives);
         let mut picc = Picc::new(&mut t, test_config_4byte());
@@ -990,7 +1224,7 @@ mod tests {
                 .to_vec()
                 .unwrap()
         };
-        let mut commands = vec![chained_iblock(0, &[0xAA; 4]); 3];
+        let mut commands = chained_command(3, &[0xAA; 4]);
         commands.push(good);
         let receives = activated(commands);
 

@@ -14,7 +14,7 @@ use super::{
     limits::{Limit, Limits},
     pcb::{BlockType, SBlockSubtype},
     pps::{Dxi, PpsParam, PpsResp},
-    protocol::{Action, ProtocolHandler},
+    protocol::{Action, ProtocolHandler, Role},
     rats::{Fsdi, RatsParam},
     vec::{ChainVec, FrameVec, VecExt},
 };
@@ -89,7 +89,7 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
                 hw_crc,
                 fsc,
                 fsd: fsdi.fsd(),
-                handler: ProtocolHandler::new(Some(cid)),
+                handler: ProtocolHandler::new(Role::Pcd, Some(cid)),
             },
             ats,
         ))
@@ -112,7 +112,7 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
             hw_crc,
             fsc: ats.format.fsci.fsc(),
             fsd: fsdi.fsd(),
-            handler: ProtocolHandler::new(cid),
+            handler: ProtocolHandler::new(Role::Pcd, cid),
         }
     }
 
@@ -206,7 +206,9 @@ impl<'t, T: PcdTransceiver> Pcd<'t, T> {
                     _ => return Err(PcdError::Protocol(TypeAError::Other)),
                 }
             } else {
-                self.handler.toggle_block_number();
+                // The PICC answers the last chunk with an I-Block carrying
+                // this same block number; Rule B toggles when that block is
+                // taken in, not before it arrives.
                 last_resp = Some(resp);
                 offset = end;
             }
@@ -451,8 +453,10 @@ mod tests {
     fn pcd_side_chaining() {
         // FSC=16, overhead=3 (PCB + CRC×2, no CID), max_inf=13
         // Send 20 bytes → 2 chunks: 13 + 7
+        // The R(ACK) carries the reader's block number 0, so Rule B toggles
+        // it to 1 and the final chunk — and the card's answer — carry 1.
         let ack = mock_rack_response(0);
-        let resp = mock_iblock_response(0, &[0xFF], false);
+        let resp = mock_iblock_response(1, &[0xFF], false);
         let mut t = MockTransceiver::new(false, vec![ack, resp]);
         let ats = small_fsc_ats();
 
@@ -622,7 +626,217 @@ mod tests {
         assert_eq!(ats.length, 5);
     }
 
+    // ── A card that follows the numbering rules ──────────────────────────
+
+    /// A PICC that applies §7.5.3 and §7.5.4 literally, so the reader is
+    /// measured against the rules rather than against its own reading of
+    /// them.
+    ///
+    /// Rule C: block number initialised to 1. Rule D: toggle on every
+    /// I-Block received. Rules E and 13: an R(ACK) carrying a number other
+    /// than the card's toggles it and releases the next chunk. Rule 11: an
+    /// R(ACK) carrying the card's own number repeats the last block instead.
+    struct SpecCard {
+        block_number: u8,
+        /// One entry per command: the response, split into chained chunks.
+        responses: Vec<Vec<Vec<u8>>>,
+        command: usize,
+        chunk: usize,
+        last_sent: Option<FrameVec>,
+        /// Commands as the card assembled them, chaining included.
+        received: Vec<Vec<u8>>,
+        partial: Vec<u8>,
+        /// How often Rule 11 fired. A reader in step never triggers it.
+        repeats: usize,
+        frames: usize,
+    }
+
+    impl SpecCard {
+        fn new(responses: Vec<Vec<Vec<u8>>>) -> Self {
+            Self {
+                block_number: 1, // Rule C
+                responses,
+                command: 0,
+                chunk: 0,
+                last_sent: None,
+                received: Vec::new(),
+                partial: Vec::new(),
+                repeats: 0,
+                frames: 0,
+            }
+        }
+
+        fn send(&mut self, frame: FrameVec) -> Result<FrameVec, MockError> {
+            self.last_sent = Some(frame.clone());
+            Ok(frame)
+        }
+
+        fn send_rack(&mut self) -> Result<FrameVec, MockError> {
+            let pcb = Pcb::new(BlockType::RBlock)
+                .with_block_number(self.block_number)
+                .with_r_subtype(RBlockSubtype::Ack);
+            let frame = Block::new(pcb).to_vec().map_err(|_| MockError)?;
+            self.send(frame)
+        }
+
+        fn send_next_chunk(&mut self) -> Result<FrameVec, MockError> {
+            let chunks = self.responses.get(self.command).ok_or(MockError)?;
+            let payload = chunks.get(self.chunk).ok_or(MockError)?.clone();
+            let chaining = self.chunk + 1 < chunks.len();
+
+            let pcb = Pcb::new(BlockType::IBlock)
+                .with_block_number(self.block_number)
+                .with_chaining(chaining);
+            let frame = Block::new(pcb)
+                .with_payload(frame_vec(&payload))
+                .to_vec()
+                .map_err(|_| MockError)?;
+
+            self.chunk += 1;
+            if !chaining {
+                self.command += 1;
+                self.chunk = 0;
+            }
+            self.send(frame)
+        }
+    }
+
+    impl PcdTransceiver for SpecCard {
+        type Error = MockError;
+
+        fn transceive(&mut self, frame: &Frame) -> Result<FrameVec, MockError> {
+            self.frames += 1;
+            if self.frames > 50 {
+                return Err(MockError); // the reader is going in circles
+            }
+            let block = Block::try_from(frame.data()).map_err(|_| MockError)?;
+
+            match block.block_type() {
+                BlockType::IBlock => {
+                    self.block_number = 1 - self.block_number; // Rule D
+                    self.partial.extend_from_slice(block.payload.as_slice());
+                    if block.is_chaining() {
+                        // Rule 2: acknowledge, then wait for the rest
+                        self.send_rack()
+                    } else {
+                        let apdu = core::mem::take(&mut self.partial);
+                        self.received.push(apdu);
+                        self.send_next_chunk()
+                    }
+                }
+                BlockType::RBlock => match block.pcb.r_subtype {
+                    Some(RBlockSubtype::Ack) if block.block_number() == self.block_number => {
+                        // Rule 11: our own number back means "say it again"
+                        self.repeats += 1;
+                        self.last_sent.clone().ok_or(MockError)
+                    }
+                    Some(RBlockSubtype::Ack) => {
+                        // Rules E and 13: a different number carries on
+                        self.block_number = 1 - self.block_number;
+                        self.send_next_chunk()
+                    }
+                    _ => Err(MockError),
+                },
+                BlockType::SBlock => Err(MockError),
+            }
+        }
+
+        fn try_enable_hw_crc(&mut self) -> Result<(), MockError> {
+            Err(MockError) // software CRC
+        }
+    }
+
+    /// Three four-byte chunks, one twelve-byte response.
+    fn three_chunks() -> Vec<Vec<u8>> {
+        vec![
+            vec![0x01, 0x02, 0x03, 0x04],
+            vec![0x05, 0x06, 0x07, 0x08],
+            vec![0x09, 0x0A, 0x0B, 0x0C],
+        ]
+    }
+
+    #[test]
+    fn spec_card_chained_response_is_assembled_once() {
+        let mut card = SpecCard::new(vec![three_chunks()]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut card, &ats, Fsdi::Fsd256, None, false);
+
+        let resp = pcd.exchange(&[0x00, 0xB0]).unwrap();
+
+        assert_eq!(
+            resp.as_slice(),
+            &[
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C
+            ]
+        );
+        assert_eq!(card.repeats, 0, "the card had to repeat a block");
+    }
+
+    #[test]
+    fn spec_card_second_chained_response_is_assembled_once() {
+        // The reported bug: the first chained response came back intact and
+        // the second one carried its first chunk twice, because the R(ACK)
+        // numbering had drifted a step by then.
+        let mut card = SpecCard::new(vec![three_chunks(), three_chunks()]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut card, &ats, Fsdi::Fsd256, None, false);
+
+        let expected = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+        ];
+        let first = pcd.exchange(&[0x00, 0xB0]).unwrap();
+        assert_eq!(first.as_slice(), &expected, "first response");
+
+        let second = pcd.exchange(&[0x00, 0xB1]).unwrap();
+        assert_eq!(second.as_slice(), &expected, "second response");
+
+        assert_eq!(card.repeats, 0, "the card had to repeat a block");
+        assert_eq!(card.received, vec![vec![0x00, 0xB0], vec![0x00, 0xB1]]);
+    }
+
+    #[test]
+    fn spec_card_serves_several_single_block_exchanges() {
+        let mut card = SpecCard::new(vec![
+            vec![vec![0x90, 0x00]],
+            vec![vec![0x91, 0x00]],
+            vec![vec![0x92, 0x00]],
+        ]);
+        let ats = minimal_ats();
+        let mut pcd = Pcd::new(&mut card, &ats, Fsdi::Fsd256, None, false);
+
+        assert_eq!(pcd.exchange(&[0x01]).unwrap().as_slice(), &[0x90, 0x00]);
+        assert_eq!(pcd.exchange(&[0x02]).unwrap().as_slice(), &[0x91, 0x00]);
+        assert_eq!(pcd.exchange(&[0x03]).unwrap().as_slice(), &[0x92, 0x00]);
+        assert_eq!(card.repeats, 0);
+    }
+
+    #[test]
+    fn spec_card_handles_chaining_in_both_directions() {
+        // FSC 16 → 13 payload bytes per command block, so a 30-byte APDU
+        // goes out in three, and the answer comes back chained as well.
+        let mut card = SpecCard::new(vec![three_chunks(), three_chunks()]);
+        let ats = small_fsc_ats();
+        let mut pcd = Pcd::new(&mut card, &ats, Fsdi::Fsd256, None, false);
+
+        let apdu: Vec<u8> = (0x00..0x1E).collect();
+        for _ in 0..2 {
+            let resp = pcd.exchange(&apdu).unwrap();
+            assert_eq!(resp.len(), 12, "response: {:02x?}", resp.as_slice());
+        }
+
+        assert_eq!(card.repeats, 0, "the card had to repeat a block");
+        assert_eq!(card.received, vec![apdu.clone(), apdu]);
+    }
+
     // ── Limit tests ─────────────────────────────────────────────────────
+
+    /// `count` chained I-Blocks with the same payload, numbered the way a
+    /// card in step with the reader numbers them: 0, 1, 0, 1, …
+    fn chained_response(count: usize, payload: &[u8]) -> Vec<FrameVec> {
+        (0..count)
+            .map(|i| mock_iblock_response((i % 2) as u8, payload, true))
+            .collect()
+    }
 
     fn mock_rnak_response(block_number: u8) -> FrameVec {
         let pcb = Pcb::new(BlockType::RBlock)
@@ -654,9 +868,10 @@ mod tests {
     #[test]
     fn response_chaining_is_bounded() {
         // A card that chains I-Blocks without ever ending the chain cannot
-        // grow the assembled payload past max_chain_len.
-        let mut t =
-            MockTransceiver::new(false, vec![mock_iblock_response(0, &[0xAA; 4], true); 20]);
+        // grow the assembled payload past max_chain_len. The numbering
+        // alternates, so each block is new payload rather than a repeat.
+        let responses = chained_response(20, &[0xAA; 4]);
+        let mut t = MockTransceiver::new(false, responses);
         let ats = minimal_ats();
         let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         pcd.set_limits(Limits {
@@ -670,7 +885,7 @@ mod tests {
 
     #[test]
     fn response_frame_budget_is_bounded() {
-        let mut t = MockTransceiver::new(false, vec![mock_iblock_response(0, &[0xAA], true); 20]);
+        let mut t = MockTransceiver::new(false, chained_response(20, &[0xAA]));
         let ats = minimal_ats();
         let mut pcd = Pcd::new(&mut t, &ats, Fsdi::Fsd256, None, false);
         pcd.set_limits(Limits {
@@ -721,8 +936,10 @@ mod tests {
     fn state_is_clean_after_a_limit_error() {
         // Nine S(WTX) trip the default consecutive budget, then a fresh
         // exchange runs normally: counters and chain start over.
+        // S(WTX) carries no block number, so the reader is still on 0 for
+        // the second exchange.
         let mut responses = vec![mock_wtx_request(0x01); 9];
-        responses.push(mock_iblock_response(1, &[0x90, 0x00], false));
+        responses.push(mock_iblock_response(0, &[0x90, 0x00], false));
 
         let mut t = MockTransceiver::new(false, responses);
         let ats = minimal_ats();

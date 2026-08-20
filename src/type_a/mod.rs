@@ -310,7 +310,7 @@ pub use pcb::{BlockType, Pcb, PcbFlags, RBlockSubtype, SBlockSubtype};
 pub use pcd::{Pcd, PcdError};
 pub use picc::{Picc, PiccConfig, PiccError, Uid};
 pub use pps::Dxi;
-pub use protocol::{Action, ProtocolHandler};
+pub use protocol::{Action, ProtocolHandler, Role};
 pub use rats::Fsdi;
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -22,7 +22,7 @@ Rust library to manipulate ISO/IEC 14443 data.
     - [x] iso14443-4: Block format (I-block, R-block, S-block)
     - [x] iso14443-4: PCD transport layer (APDU exchange, chaining, WTX, error recovery, DESELECT)
     - [x] iso14443-4: PICC transport layer (card emulation, chaining, PPS, DESELECT → HALT)
-    - [x] iso14443-4: Generic block protocol handler (reusable for PCD and PICC)
+    - [x] iso14443-4: Generic block protocol handler, role-aware (PCD and PICC block numbering and R-block rules)
     - [x] iso14443-4: Per-exchange work limits (frame budget, R(NAK) and S(WTX) budgets, chain length and frame size caps)
     - [x] Strict CRC_A validation on wire frames, with a separate `from_crc_verified` API for hardware-validated frames
 - [ ] Type-B
