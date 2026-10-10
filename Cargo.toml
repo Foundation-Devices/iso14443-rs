@@ -10,7 +10,7 @@ license = "GPL-3.0-or-later"
 name = "iso14443"
 repository = "https://github.com/Foundation-Devices/iso14443-rs"
 rust-version = "1.88.0"
-version = "0.3.0"
+version = "0.3.1"
 
 [features]
 default = []
