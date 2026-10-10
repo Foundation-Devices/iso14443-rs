@@ -7,7 +7,7 @@
 //! (REQA/anticollision/SELECT), RATS/ATS, and ISO14443-4 block exchange.
 
 use super::{
-    Ats, Block, Cid, Frame, PiccTransceiver, Sak, TypeAError,
+    Ats, Block, Cid, Frame, PiccTransceiver, Sak, Tc, TypeAError,
     anticol_select::{SEL_CL1, SEL_CL2, SEL_CL3},
     atqa::AtqA,
     crc::{append_crc_a, split_crc_a},
@@ -417,7 +417,14 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                 };
                 let rats = RatsParam::try_from(param_byte)?;
                 self.fsd = rats.fsdi().fsd();
-                let cid = Cid::new(rats.cid().value());
+                // A card without CID support ignores the CID proposed in RATS
+                // and never sends one (§5.6.3).
+                let cid = self
+                    .config
+                    .ats
+                    .as_ref()
+                    .filter(|ats| ats.tc.contains(Tc::CID_SUPP))
+                    .and_then(|_| Cid::new(rats.cid().value()));
                 self.handler =
                     ProtocolHandler::with_limits(Role::Picc, cid, *self.handler.limits());
 
@@ -762,6 +769,39 @@ mod tests {
         let block = Block::try_from(last.as_slice()).unwrap();
         assert_eq!(block.block_type(), BlockType::IBlock);
         assert_eq!(block.payload.as_slice(), &[0x90, 0x00]);
+    }
+
+    #[test]
+    fn no_cid_support_means_no_cid_in_responses() {
+        use super::super::ats::{Fsci, Ta, Tb, Tc};
+        let mut config = test_config_4byte();
+        config.enable_14443_4(Ats::new(
+            Fsci::Fsc256,
+            Ta::SAME_D_SUPP,
+            Tb::default(),
+            Tc::empty(),
+        ));
+
+        let uid_bcc = [0x01, 0x02, 0x03, 0x04, 0x04];
+        let pcb = Pcb::new(BlockType::IBlock).with_block_number(0);
+        let iblock = Block::new(pcb).with_payload(frame_vec(&[0x01]));
+        let receives = vec![
+            frame_vec(&[0x26]),
+            frame_vec(&[0x93, 0x20]),
+            select_cmd(0x93, &uid_bcc),
+            rats_cmd(8, 5), // the PCD proposes CID 5
+            append_crc_a(&iblock.to_bytes_without_crc().unwrap()).unwrap(),
+        ];
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, config);
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+        let _ = picc.receive_command().unwrap();
+        picc.send_response(&[0x90, 0x00]).unwrap();
+
+        let block = Block::try_from(t.sends.last().unwrap().as_slice()).unwrap();
+        assert!(block.cid.is_none());
     }
 
     #[test]
