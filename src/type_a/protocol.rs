@@ -318,10 +318,9 @@ impl ProtocolHandler {
                 Ok(Action::ChainingAck)
             }
             // Rule 12: an out-of-step R(NAK) is answered with an R(ACK).
-            (Role::Picc, Some(RBlockSubtype::Nak)) => {
-                self.note_retransmit()?;
-                Ok(Action::Reply(self.build_rack()?))
-            }
+            // Readers poll with it to check that the card is still there, so
+            // it asks for nothing again and only the frame budget counts it.
+            (Role::Picc, Some(RBlockSubtype::Nak)) => Ok(Action::Reply(self.build_rack()?)),
             (_, None) => Err(TypeAError::InvalidPcb),
         }
     }
@@ -789,6 +788,16 @@ mod tests {
         let mut handler = picc();
         assert_eq!(rack_number(handler.process_received(rnak(0)).unwrap()), 1);
         assert_eq!(handler.block_number(), 1);
+    }
+
+    #[test]
+    fn picc_answers_every_presence_check() {
+        // A reader checking for presence sends out-of-step R(NAK)s for as
+        // long as the card sits idle in its field.
+        let mut handler = picc();
+        for _ in 0..usize::from(Limits::default().max_retransmissions) * 4 {
+            assert_eq!(rack_number(handler.process_received(rnak(0)).unwrap()), 1);
+        }
     }
 
     #[test]
