@@ -156,6 +156,8 @@ pub struct Picc<'t, T: PiccTransceiver> {
     state: PiccState,
     /// PCD's max frame size (from RATS FSDI), used for chaining responses.
     fsd: usize,
+    /// The block a PCD that missed it asks for again (Rule 11).
+    last_sent: Option<Block>,
 }
 
 impl<'t, T: PiccTransceiver> Picc<'t, T> {
@@ -169,6 +171,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
             handler: ProtocolHandler::new(Role::Picc, None),
             state: PiccState::Idle,
             fsd: 256, // default until RATS
+            last_sent: None,
         }
     }
 
@@ -270,6 +273,15 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
                     }
                     // R(ACK) for chaining or S(WTX) echo
                     self.send_block(&reply)?;
+                }
+                // Rule 11: the PCD did not get the last block, typically
+                // the response to its previous command.
+                Action::ChainingRetransmit => {
+                    let last = self
+                        .last_sent
+                        .clone()
+                        .ok_or(PiccError::Protocol(TypeAError::Other))?;
+                    self.send_block(&last)?;
                 }
                 _ => return Err(PiccError::Protocol(TypeAError::Other)),
             }
@@ -510,6 +522,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
     }
 
     fn send_block(&mut self, block: &Block) -> Result<(), PiccError<T::Error>> {
+        self.last_sent = Some(block.clone());
         let data = block.to_bytes_without_crc()?;
         let frame = if self.hw_crc {
             Frame::Standard(data)
@@ -830,6 +843,40 @@ mod tests {
             Err(PiccError::Deselected) => {} // expected
             other => panic!("expected Deselected, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn response_the_reader_missed_is_sent_again() {
+        let iblock = |number| {
+            let pcb = Pcb::new(BlockType::IBlock).with_block_number(number);
+            Block::new(pcb)
+                .with_payload(frame_vec(&[0x01]))
+                .to_vec()
+                .unwrap()
+        };
+        // Rule 11: the R(NAK) carries the number of the response the
+        // reader is still waiting for.
+        let rnak = Pcb::new(BlockType::RBlock)
+            .with_block_number(0)
+            .with_r_subtype(RBlockSubtype::Nak);
+        let receives = activated(vec![
+            iblock(0),
+            Block::new(rnak).to_vec().unwrap(),
+            iblock(1),
+        ]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+        let _ = picc.receive_command().unwrap();
+        picc.send_response(&[0x90, 0x00]).unwrap();
+        let _ = picc.receive_command().unwrap();
+
+        let [.., response, repeat] = t.sends.as_slice() else {
+            panic!("expected the response and its repeat, got {:?}", t.sends);
+        };
+        assert_eq!(response, repeat);
     }
 
     #[test]
