@@ -291,6 +291,8 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
     /// Send a response APDU back to the PCD.
     ///
     /// Handles chaining if the response exceeds the PCD's frame size (FSD).
+    /// An empty response goes out as an empty I-Block, the answer to the
+    /// empty I-Block a PCD checks presence with (Rule 10).
     pub fn send_response(&mut self, data: &[u8]) -> Result<(), PiccError<T::Error>> {
         let cid_len = if self.handler.build_iblock(&[], false)?.cid.is_some() {
             1
@@ -304,7 +306,7 @@ impl<'t, T: PiccTransceiver> Picc<'t, T> {
         }
 
         let mut offset = 0;
-        while offset < data.len() {
+        loop {
             let end = core::cmp::min(offset + max_inf, data.len());
             let chaining = end < data.len();
             // Rule D toggled the block number when the command came in, so
@@ -843,6 +845,23 @@ mod tests {
             Err(PiccError::Deselected) => {} // expected
             other => panic!("expected Deselected, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn empty_response_is_an_empty_iblock() {
+        let pcb = Pcb::new(BlockType::IBlock).with_block_number(0);
+        let receives = activated(vec![Block::new(pcb).to_vec().unwrap()]);
+
+        let mut t = MockPiccTransceiver::new(receives);
+        let mut picc = Picc::new(&mut t, test_config_4byte());
+        picc.wait_for_activation().unwrap();
+        picc.wait_for_rats().unwrap();
+        assert!(picc.receive_command().unwrap().is_empty());
+        picc.send_response(&[]).unwrap();
+
+        let block = Block::try_from(t.sends.last().unwrap().as_slice()).unwrap();
+        assert_eq!(block.block_type(), BlockType::IBlock);
+        assert!(block.payload.is_empty());
     }
 
     #[test]
