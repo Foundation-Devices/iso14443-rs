@@ -34,7 +34,8 @@
 //! ## Features
 //!
 //! - `alloc` — use `Vec` instead of `heapless::Vec` for frame buffers
-//! - `std` — implies `alloc`, enables `Duration`-based timing calculations
+//! - `std` — implies `alloc`, links `std` (std-only tests, the loopback
+//!   example, and the timing-bearing `Debug` output of `Fwi`/`Sfgi`)
 //!
 //! `#![no_std]` by default (uses `heapless` with fixed-size buffers).
 

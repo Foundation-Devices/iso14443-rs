@@ -8,8 +8,7 @@ use super::{TypeAError, crc::split_crc_a};
 use bitflags::bitflags;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-#[cfg(feature = "std")]
-use std::time::Duration;
+use core::time::Duration;
 
 /// ISO/IEC 14443-4
 /// 5.2 Answer to select
@@ -273,7 +272,6 @@ impl TryFrom<u8> for Sfgi {
     }
 }
 
-#[cfg(feature = "std")]
 impl Sfgi {
     /// The SFGT defines a specific guard time needed by the PICC before it is ready to receive the next frame after it has sent the ATS.
     pub fn sfgt(&self) -> Duration {
@@ -338,7 +336,6 @@ impl fmt::Debug for Fwi {
 
 /// FWT is calculated by the following formula:
 /// FWT = (256 x 16 / fc) x 2^FWI
-#[cfg(feature = "std")]
 impl Fwi {
     pub fn fwt(&self) -> Duration {
         Duration::from_micros((256.0 * 16.0 / 13.56) as u64 * (1 << self.0) as u64)
@@ -363,7 +360,7 @@ impl Default for Tc {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
